@@ -1,6 +1,6 @@
 from typing import Dict
 import jax
-import gym
+import gymnasium as gym
 import numpy as np
 from collections import defaultdict
 import time
@@ -62,10 +62,11 @@ def evaluate(policy_fn, env: gym.Env, num_episodes: int) -> Dict[str, float]:
     """
     stats = defaultdict(list)
     for _ in range(num_episodes):
-        observation, done = env.reset(), False
+        (observation, _), done = env.reset(), False
         while not done:
             action = policy_fn(observation)
-            observation, _, done, info = env.step(action)
+            observation, _, term, trunc, info = env.step(action)
+            done = term or trunc
             add_to(stats, flatten(info))
         add_to(stats, flatten(info, parent_key="final"))
 
@@ -100,10 +101,11 @@ def evaluate_with_trajectories(
 
     for _ in range(num_episodes):
         trajectory = defaultdict(list)
-        observation, done = env.reset(), False
+        (observation, _), done = env.reset(), False
         while not done:
             action = policy_fn(observation)
-            next_observation, r, done, info = env.step(action)
+            next_observation, r, term, trunc, info = env.step(action)
+            done = term or trunc
             transition = dict(
                 observation=observation,
                 next_observation=next_observation,
@@ -137,7 +139,8 @@ class EpisodeMonitor(gym.ActionWrapper):
         self.start_time = time.time()
 
     def step(self, action: np.ndarray):
-        observation, reward, done, info = self.env.step(action)
+        observation, reward, term, trunc, info = self.env.step(action)
+        done = term or trunc 
 
         self.reward_sum += reward
         self.episode_length += 1
@@ -155,7 +158,7 @@ class EpisodeMonitor(gym.ActionWrapper):
                     self.get_normalized_score(info["episode"]["return"]) * 100.0
                 )
 
-        return observation, reward, done, info
+        return observation, reward, term, trunc, info
 
     def reset(self) -> np.ndarray:
         self._reset_stats()

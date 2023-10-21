@@ -4,7 +4,7 @@ from functools import partial
 import numpy as np
 import jax
 import tqdm
-import gym
+import gymnasium as gym
 
 import sac as learner
 
@@ -19,7 +19,7 @@ from flax.training import checkpoints
 
 
 FLAGS = flags.FLAGS
-flags.DEFINE_string('env_name', 'HalfCheetah-v2', 'Environment name.')
+flags.DEFINE_string('env_name', 'HalfCheetah-v4', 'Environment name.')
 
 flags.DEFINE_string('save_dir', None, 'Logging dir.')
 
@@ -76,7 +76,7 @@ def main(_):
                     **FLAGS.config)
     
     exploration_metrics = dict()
-    obs = env.reset()    
+    obs, _ = env.reset()    
     exploration_rng = jax.random.PRNGKey(0)
 
     for i in tqdm.tqdm(range(1, FLAGS.max_steps + 1),
@@ -89,8 +89,10 @@ def main(_):
             exploration_rng, key = jax.random.split(exploration_rng)
             action = agent.sample_actions(obs, seed=key)
 
-        next_obs, reward, done, info = env.step(action)
-        mask = float(not done or 'TimeLimit.truncated' in info)
+        next_obs, reward, term, trunc, info = env.step(action)
+        done = term or trunc
+        mask = float(not term)
+        # mask = float(not done or 'TimeLimit.truncated' in info)
 
         replay_buffer.add_transition(dict(
             observations=obs,
@@ -103,7 +105,7 @@ def main(_):
 
         if done:
             exploration_metrics = {f'exploration/{k}': v for k, v in flatten(info).items()}
-            obs = env.reset()
+            obs, _ = env.reset()
 
         if replay_buffer.size < FLAGS.start_steps:
             continue

@@ -1,5 +1,5 @@
 import d4rl
-import gym
+import gymnasium as gym
 import numpy as np
 
 from jaxrl_m.dataset import Dataset
