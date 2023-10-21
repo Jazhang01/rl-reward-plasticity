@@ -1,9 +1,10 @@
-from typing import Dict
-import jax
-import gymnasium as gym
-import numpy as np
-from collections import defaultdict
 import time
+from collections import defaultdict
+from typing import Dict
+
+import gymnasium as gym
+import jax
+import numpy as np
 
 
 def supply_rng(f, rng=jax.random.PRNGKey(0)):
@@ -140,7 +141,7 @@ class EpisodeMonitor(gym.ActionWrapper):
 
     def step(self, action: np.ndarray):
         observation, reward, term, trunc, info = self.env.step(action)
-        done = term or trunc 
+        done = term or trunc
 
         self.reward_sum += reward
         self.episode_length += 1

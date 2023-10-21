@@ -1,11 +1,14 @@
-from jaxrl_m.typing import *
+import functools
+
 import flax
 import flax.linen as nn
 import jax
 import optax
-import functools
+
+from jaxrl_m.typing import *
 
 nonpytree_field = functools.partial(flax.struct.field, pytree_node=False)
+
 
 def target_update(
     model: "TrainState", target_model: "TrainState", tau: float
@@ -49,7 +52,9 @@ class TrainState(flax.struct.PyTreeNode):
     apply_fn: Callable[..., Any] = nonpytree_field()
     model_def: Any = nonpytree_field()
     params: Params
-    extra_variables: Optional[Params] # Use this to store additional variables that are not being optimized
+    extra_variables: Optional[
+        Params
+    ]  # Use this to store additional variables that are not being optimized
     tx: Optional[optax.GradientTransformation] = nonpytree_field()
     opt_state: Optional[optax.OptState] = None
 
@@ -84,7 +89,7 @@ class TrainState(flax.struct.PyTreeNode):
     def __call__(
         self,
         *args,
-        params: Params =None,
+        params: Params = None,
         extra_variables: dict = None,
         method: ModuleMethod = None,
         **kwargs,
@@ -155,15 +160,15 @@ class TrainState(flax.struct.PyTreeNode):
             if pmap_axis is not None:
                 grads = jax.lax.pmean(grads, axis_name=pmap_axis)
             return self.apply_gradients(grads=grads)
-    
+
     def __getattr__(self, name):
         """
-            Syntax sugar for calling methods of the model_def directly.
+        Syntax sugar for calling methods of the model_def directly.
 
-            Example:
-            ```
-                model(x, method='encode')
-                model.encode(x) # Same as last
+        Example:
+        ```
+            model(x, method='encode')
+            model.encode(x) # Same as last
         """
         method = getattr(self.model_def, name)
         return functools.partial(self.__call__, method=method)

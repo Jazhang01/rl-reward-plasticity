@@ -12,14 +12,11 @@ This file contains nn.Module definitions for common networks used in RL. It is d
     ActorCritic: Same as WithEncoder, but for possibly many different networks (e.g. actor, critic, value)
 """
 
-from jaxrl_m.typing import *
-
-import flax.linen as nn
-import jax.numpy as jnp
-
 import distrax
 import flax.linen as nn
 import jax.numpy as jnp
+
+from jaxrl_m.typing import *
 
 ###############################
 #
@@ -99,7 +96,7 @@ def ensemblize(cls, num_qs, out_axes=0, **kwargs):
         in_axes=None,
         out_axes=out_axes,
         axis_size=num_qs,
-        **kwargs
+        **kwargs,
     )
 
 
