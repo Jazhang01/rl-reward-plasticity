@@ -161,6 +161,6 @@ class EpisodeMonitor(gym.ActionWrapper):
 
         return observation, reward, term, trunc, info
 
-    def reset(self) -> np.ndarray:
+    def reset(self):
         self._reset_stats()
         return self.env.reset()

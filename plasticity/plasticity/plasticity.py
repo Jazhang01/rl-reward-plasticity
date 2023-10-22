@@ -43,7 +43,7 @@ def update_mse_lyle(
         # apply transformation to qs
         transformed_qs = qs.mean() + jnp.sin(1e5 * rand_qs)
 
-        loss = ((transformed_qs - rand_qs) ** 2).mean()
+        loss = ((qs - transformed_qs) ** 2).mean()
 
         info = {"loss": loss}
         return loss, info
