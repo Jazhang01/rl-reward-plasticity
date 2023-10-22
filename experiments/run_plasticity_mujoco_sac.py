@@ -16,6 +16,7 @@ from ml_collections import config_flags
 from jaxrl_m.dataset import ReplayBuffer
 from jaxrl_m.evaluation import EpisodeMonitor, evaluate, flatten, supply_rng
 from jaxrl_m.wandb import default_wandb_config, get_flag_dict, setup_wandb
+from plasticity.plasticity import compute_q_plasticity
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string("env_name", "HalfCheetah-v4", "Environment name.")
@@ -26,6 +27,10 @@ flags.DEFINE_integer("log_interval", 1000, "Logging interval.")
 flags.DEFINE_integer("eval_interval", 10000, "Eval interval.")
 flags.DEFINE_integer("save_interval", 25000, "Eval interval.")
 flags.DEFINE_integer("batch_size", 256, "Mini batch size.")
+flags.DEFINE_integer("buffer_size", int(1e6), "Replay buffer size.")
+flags.DEFINE_integer(
+    "random_buffer_size", int(1e4), "Buffer size for use in plasticity calculation."
+)
 flags.DEFINE_integer("max_steps", int(1e6), "Number of training steps.")
 flags.DEFINE_integer("start_steps", int(1e4), "Number of initial exploration steps.")
 
@@ -71,7 +76,26 @@ def main(_):
         next_observations=env.observation_space.sample(),
     )
 
-    replay_buffer = ReplayBuffer.create(example_transition, size=int(1e6))
+    replay_buffer = ReplayBuffer.create(example_transition, size=FLAGS.buffer_size)
+
+    rng = jax.random.PRNGKey(FLAGS.seed)
+    exploration_rng, plasticity_rng = jax.random.split(rng, 2)
+
+    plasticity_dataset = ReplayBuffer.create(
+        example_transition, size=FLAGS.random_buffer_size
+    )
+    for _ in tqdm.tqdm(range(FLAGS.random_buffer_size), desc="Generating random data"):
+        obs = env.observation_space.sample()
+        action = env.action_space.sample()
+        plasticity_dataset.add_transition(
+            dict(
+                observations=obs,
+                actions=action,
+                rewards=0.0,
+                masks=1.0,
+                next_observations=obs,
+            )
+        )
 
     agent = learner.create_learner(
         FLAGS.seed,
@@ -83,7 +107,6 @@ def main(_):
 
     exploration_metrics = dict()
     obs, _ = env.reset()
-    exploration_rng = jax.random.PRNGKey(0)
 
     for i in tqdm.tqdm(
         range(1, FLAGS.max_steps + 1), smoothing=0.1, dynamic_ncols=True
@@ -130,6 +153,12 @@ def main(_):
         if i % FLAGS.eval_interval == 0:
             policy_fn = partial(supply_rng(agent.sample_actions), temperature=0.0)
             eval_info = evaluate(policy_fn, eval_env, num_episodes=FLAGS.eval_episodes)
+
+            rng_key, plasticity_rng = jax.random.split(plasticity_rng, 2)
+            plasticity_info = compute_q_plasticity(
+                rng_key, agent.critic, plasticity_dataset, batch_size=FLAGS.batch_size
+            )
+            eval_info.update(plasticity_info)
 
             eval_metrics = {f"evaluation/{k}": v for k, v in eval_info.items()}
             wandb.log(eval_metrics, step=i)
