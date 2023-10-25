@@ -10,6 +10,7 @@ import tqdm
 import wandb
 from absl import app, flags
 from config import WANDB_DEFAULT_CONFIG
+from environments.wrappers.reward import AddGaussianReward, ConstantReward
 from flax.training import checkpoints
 from ml_collections import config_flags
 
@@ -20,6 +21,7 @@ from plasticity.plasticity import compute_q_plasticity
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string("env_name", "HalfCheetah-v4", "Environment name.")
+flags.DEFINE_string("reward_wrapper", None, "Optional reward wrapper type to use.")
 flags.DEFINE_string("save_dir", None, "Logging dir.")
 flags.DEFINE_integer("seed", np.random.choice(1000000), "Random seed.")
 flags.DEFINE_integer("eval_episodes", 10, "Number of episodes used for evaluation.")
@@ -29,7 +31,7 @@ flags.DEFINE_integer("save_interval", 25000, "Eval interval.")
 flags.DEFINE_integer("batch_size", 256, "Mini batch size.")
 flags.DEFINE_integer("buffer_size", int(1e6), "Replay buffer size.")
 flags.DEFINE_integer(
-    "random_buffer_size", int(1e4), "Buffer size for use in plasticity calculation."
+    "random_buffer_size", int(1e5), "Buffer size for use in plasticity calculation."
 )
 flags.DEFINE_integer("max_steps", int(1e6), "Number of training steps.")
 flags.DEFINE_integer("start_steps", int(1e4), "Number of initial exploration steps.")
@@ -38,8 +40,8 @@ wandb_config = default_wandb_config()
 wandb_config.update(
     {
         **WANDB_DEFAULT_CONFIG,
-        "group": "sac_test",
-        "name": "sac_{env_name}",
+        # "group": "sac_test",
+        # "name": "sac_{env_name}",
     }
 )
 
@@ -65,8 +67,26 @@ def main(_):
         with open(os.path.join(FLAGS.save_dir, "config.pkl"), "wb") as f:
             pickle.dump(get_flag_dict(), f)
 
+    rng = jax.random.PRNGKey(FLAGS.seed)
+
     env = EpisodeMonitor(gym.make(FLAGS.env_name))
     eval_env = EpisodeMonitor(gym.make(FLAGS.env_name))
+
+    if FLAGS.reward_wrapper is not None:
+        if FLAGS.reward_wrapper == "zero":
+            wrapper = partial(ConstantReward, reward=0.0)
+        elif FLAGS.reward_wrapper == "one":
+            wrapper = partial(ConstantReward, reward=1.0)
+        elif FLAGS.reward_wrapper == "unit_noise":
+            noise_rng, rng = jax.random.split(rng, 2)
+            wrapper = partial(
+                AddGaussianReward, rng=noise_rng, noise_mean=0.0, noise_std=1.0
+            )
+        else:
+            raise NotImplementedError
+
+        env = wrapper(env)
+        eval_env = wrapper(env)
 
     example_transition = dict(
         observations=env.observation_space.sample(),
@@ -78,7 +98,6 @@ def main(_):
 
     replay_buffer = ReplayBuffer.create(example_transition, size=FLAGS.buffer_size)
 
-    rng = jax.random.PRNGKey(FLAGS.seed)
     exploration_rng, plasticity_rng = jax.random.split(rng, 2)
 
     plasticity_dataset = ReplayBuffer.create(

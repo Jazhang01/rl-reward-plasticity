@@ -161,6 +161,6 @@ class EpisodeMonitor(gym.ActionWrapper):
 
         return observation, reward, term, trunc, info
 
-    def reset(self):
+    def reset(self, **kwargs):
         self._reset_stats()
-        return self.env.reset()
+        return self.env.reset(**kwargs)
