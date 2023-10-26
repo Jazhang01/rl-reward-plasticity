@@ -116,6 +116,70 @@ def group_update_mse_lyle(
     return new_critics, update_infos
 
 
+@jax.jit
+def update_mse_perturb(
+    critic: TrainState,
+    initial_critic: TrainState,
+    rand_critic: TrainState,
+    batch: Batch,
+    freq: float = 1e5,
+):
+    def mse_loss_fn(params):
+        obs, action = batch["observations"], batch["actions"]
+        qs = critic(obs, action, params=params).min(axis=0)
+        init_qs = initial_critic(obs, action, params=initial_critic.params).min(axis=0)
+        rand_qs = rand_critic(obs, action, params=rand_critic.params).min(axis=0)
+
+        # perturb_qs = init_qs + jnp.sin(freq * rand_qs)
+        # perturb_qs = init_qs + init_qs.std() * 10 * rand_qs
+        perturb_qs = init_qs + 10 * rand_qs
+        perturb_qs = jax.lax.stop_gradient(perturb_qs)
+
+        # loss = ((qs - perturb_qs) ** 2).mean() / (init_qs.var() + 1e-6)
+        loss = ((qs - perturb_qs) ** 2).mean()
+
+        info = {
+            "loss": loss,
+            "init_qs_mean": init_qs.mean(),
+            "init_qs_std": init_qs.std(),
+            "perturb_qs": perturb_qs,
+        }
+        return loss, info
+
+    new_critic, info = critic.apply_loss_fn(loss_fn=mse_loss_fn, has_aux=True)
+    return new_critic, info
+
+
+@jax.jit
+def group_update_mse_perturb(
+    critics: Sequence[TrainState],
+    initial_critics: Sequence[TrainState],
+    rand_critics: Sequence[TrainState],
+    batch: Batch,
+    freq: float = 1e5,
+):
+    """
+    Batch update critics to match target networks.
+    """
+    num_copies = len(critics)
+    assert num_copies == len(rand_critics)
+
+    update_infos = []
+    new_critics = [None] * num_copies
+
+    for critic_idx in range(num_copies):
+        new_critics[critic_idx], update_info = update_mse_perturb(
+            critics[critic_idx],
+            initial_critics[critic_idx],
+            rand_critics[critic_idx],
+            batch,
+            freq=freq,
+        )
+        update_infos.append(update_info)
+
+    return new_critics, update_infos
+
+
 def compute_q_plasticity(
     rng: PRNGKey,
     critic: TrainState,
@@ -148,14 +212,24 @@ def compute_q_plasticity(
     ]
 
     # create k copies of the given train state
-    critics = [critic.replace() for _ in range(num_copies)]
+    initial_critics = [critic.replace() for _ in range(num_copies)]
+    critics = [
+        TrainState.create(
+            critic_def, critic.params.copy(), tx=optax.adam(learning_rate=3e-4)
+        )
+        for _ in range(num_copies)
+    ]
+    # critics = [
+    #     TrainState.create(critic_def, critic.params.copy(), tx=optax.sgd(learning_rate=3e-4))
+    #     for _ in range(num_copies)
+    # ]
 
     # estimate q means
-    q_mean_batch = replay_buffer.sample(batch_size)
-    q_means = []
-    for critic in critics:
-        qs = critic(q_mean_batch["observations"], q_mean_batch["actions"]).min(axis=0)
-        q_means.append(qs.mean().item())
+    # q_mean_batch = replay_buffer.sample(batch_size)
+    # q_means = []
+    # for critic in critics:
+    #     qs = critic(q_mean_batch["observations"], q_mean_batch["actions"]).min(axis=0)
+    #     q_means.append(qs.mean().item())
 
     # train the copied train states to match the k new critics
     update_infos = []
@@ -163,8 +237,11 @@ def compute_q_plasticity(
         range(num_train_steps), desc="Computing plasticity", leave=False
     ):
         batch = replay_buffer.sample(batch_size)
-        critics, update_info = group_update_mse_lyle(
-            critics, rand_critics, means=q_means, batch=batch, freq=10
+        # critics, update_info = group_update_mse_lyle(
+        #     critics, rand_critics, means=q_means, batch=batch, freq=10
+        # )
+        critics, update_info = group_update_mse_perturb(
+            critics, initial_critics, rand_critics, batch, freq=10
         )
         update_infos.append(update_info)
 
@@ -185,4 +262,9 @@ def compute_q_plasticity(
     ax = fig.add_subplot()
     ax.plot(df["loss"])
 
-    return {"plasticity": -df["loss"].iloc[-1], "plasticity_loss": fig}
+    return {
+        "plasticity": -df["loss"].iloc[-1],
+        "plasticity_loss": fig,
+        "initial_qs_mean": df["init_qs_mean"].mean(),
+        "initial_qs_std": df["init_qs_std"].mean(),
+    }
