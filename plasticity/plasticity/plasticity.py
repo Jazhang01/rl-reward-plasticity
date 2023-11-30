@@ -131,12 +131,12 @@ def update_mse_perturb(
         rand_qs = rand_critic(obs, action, params=rand_critic.params).min(axis=0)
 
         # perturb_qs = init_qs + jnp.sin(freq * rand_qs)
-        # perturb_qs = init_qs + init_qs.std() * 10 * rand_qs
-        perturb_qs = init_qs + 10 * rand_qs
+        perturb_qs = init_qs + init_qs.std() * 10 * rand_qs
+        # perturb_qs = init_qs + 10 * rand_qs
         perturb_qs = jax.lax.stop_gradient(perturb_qs)
 
-        # loss = ((qs - perturb_qs) ** 2).mean() / (init_qs.var() + 1e-6)
-        loss = ((qs - perturb_qs) ** 2).mean()
+        loss = ((qs - perturb_qs) ** 2).mean() / (init_qs.var() + 1e-6)
+        # loss = ((qs - perturb_qs) ** 2).mean()
 
         info = {
             "loss": loss,
