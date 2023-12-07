@@ -28,3 +28,14 @@ class AddGaussianReward(RewardWrapper):
         noise = jax.random.normal(noise_key)
         noise = float(noise * self.noise_std + self.noise_mean)
         return reward + noise
+
+
+class ShiftScaleReward(RewardWrapper):
+    def __init__(self, env: Env, shift: float = 0.0, scale: float = 0.0):
+        super().__init__(env)
+
+        self.shift = shift
+        self.scale = scale
+    
+    def reward(self, reward: float) -> float:
+        return (reward + self.shift) * self.scale
