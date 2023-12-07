@@ -12,6 +12,7 @@ from absl import app, flags
 from config import WANDB_DEFAULT_CONFIG
 from environments.wrappers.reward import AddGaussianReward, ConstantReward
 from flax.training import checkpoints
+import orbax.checkpoint
 from ml_collections import config_flags
 
 from jaxrl_m.dataset import ReplayBuffer
@@ -21,8 +22,10 @@ from plasticity.plasticity import compute_q_plasticity
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string("env_name", "HalfCheetah-v4", "Environment name.")
+flags.DEFINE_boolean("invert_env", False, "Invert the objective of the environment.")
 flags.DEFINE_string("reward_wrapper", None, "Optional reward wrapper type to use.")
 flags.DEFINE_string("save_dir", None, "Logging dir.")
+flags.DEFINE_string("load_dir", None, "Loading dir.")
 flags.DEFINE_integer("seed", np.random.choice(1000000), "Random seed.")
 flags.DEFINE_integer("eval_episodes", 10, "Number of episodes used for evaluation.")
 flags.DEFINE_integer("log_interval", 1000, "Logging interval.")
@@ -40,8 +43,8 @@ wandb_config = default_wandb_config()
 wandb_config.update(
     {
         **WANDB_DEFAULT_CONFIG,
-        # "group": "sac_test",
-        # "name": "sac_{env_name}",
+        "group": "sac_test",
+        "name": "sac_{env_name}",
     }
 )
 
@@ -68,12 +71,26 @@ def main(_):
             pickle.dump(get_flag_dict(), f)
 
     rng = jax.random.PRNGKey(FLAGS.seed)
+    
+    env_kwargs = {}
+    if FLAGS.env_name == "Hopper-v4":
+        env_kwargs['forward_reward_weight'] = 1.0
+    elif FLAGS.env_name == "HalfCheetah-v4":
+        env_kwargs['forward_reward_weight'] = 1.0
+    elif FLAGS.env_name == "Humanoid-v4":
+        env_kwargs['forward_reward_weight'] = 1.25
+    
+    if FLAGS.invert_env:
+        if FLAGS.env_name in ["Hopper-v4", "HalfCheetah-v4", "Humanoid-v4"]:
+            env_kwargs['forward_reward_weight'] *= -1.0
 
-    env = EpisodeMonitor(gym.make(FLAGS.env_name))
-    eval_env = EpisodeMonitor(gym.make(FLAGS.env_name))
+    env = EpisodeMonitor(gym.make(FLAGS.env_name, **env_kwargs))
+    eval_env = EpisodeMonitor(gym.make(FLAGS.env_name, **env_kwargs))
 
     if FLAGS.reward_wrapper is not None:
-        if FLAGS.reward_wrapper == "zero":
+        if FLAGS.reward_wrapper == "identity":
+            wrapper = lambda x: x
+        elif FLAGS.reward_wrapper == "zero":
             wrapper = partial(ConstantReward, reward=0.0)
         elif FLAGS.reward_wrapper == "one":
             wrapper = partial(ConstantReward, reward=1.0)
@@ -123,6 +140,15 @@ def main(_):
         max_steps=FLAGS.max_steps,
         **FLAGS.config,
     )
+
+    if FLAGS.load_dir not in [None, "None"]:
+        orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+        init_agent = orbax_checkpointer.restore(FLAGS.load_dir, item=agent)
+        
+        # initialize critic params
+        agent.critic.replace(params=init_agent.critic.params)
+        agent.target_critic.replace(params=init_agent.target_critic.params)
+
 
     exploration_metrics = dict()
     obs, _ = env.reset()
