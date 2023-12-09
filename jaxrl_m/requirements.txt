@@ -9,6 +9,7 @@ distrax
 
 gymnasium
 gymnasium[mujoco]
+gymnasium-robotics
 
 tqdm
 wandb
