@@ -3,6 +3,7 @@ import functools
 import flax
 import flax.linen as nn
 import jax
+import jax.numpy.linalg
 import optax
 
 from jaxrl_m.typing import *
@@ -153,7 +154,12 @@ class TrainState(flax.struct.PyTreeNode):
             if pmap_axis is not None:
                 grads = jax.lax.pmean(grads, axis_name=pmap_axis)
                 info = jax.lax.pmean(info, axis_name=pmap_axis)
-            return self.apply_gradients(grads=grads), info
+            grad_norm = jax.tree_map(jax.numpy.linalg.norm, grads)
+            flattened_grad_norm = {
+                "grad_norm/" + ".".join(map(lambda k: k.key, path)): leaf
+                for path, leaf in jax.tree_util.tree_leaves_with_path(grad_norm)
+            }
+            return self.apply_gradients(grads=grads), {**info, **flattened_grad_norm}
 
         else:
             grads = jax.grad(loss_fn, has_aux=has_aux)(self.params)

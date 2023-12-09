@@ -108,13 +108,17 @@ class SACAgent(flax.struct.PyTreeNode):
             loss_fn=temp_loss_fn, has_aux=True
         )
 
+        prefixed_critic_info = {f"critic/{k}": v for k, v in critic_info.items()}
+        prefixed_actor_info = {f"actor/{k}": v for k, v in actor_info.items()}
+        prefixed_temp_info = {f"temp/{k}": v for k, v in temp_info.items()}
+
         return agent.replace(
             rng=new_rng,
             critic=new_critic,
             target_critic=new_target_critic,
             actor=new_actor,
             temp=new_temp,
-        ), {**critic_info, **actor_info, **temp_info}
+        ), {**prefixed_critic_info, **prefixed_actor_info, **prefixed_temp_info}
 
     @jax.jit
     def sample_actions(

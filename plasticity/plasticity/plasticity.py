@@ -8,6 +8,7 @@ import optax
 import pandas as pd
 import tqdm
 import wandb
+import wandb.plot
 
 from jaxrl_m.common import TrainState
 from jaxrl_m.dataset import ReplayBuffer
@@ -248,23 +249,31 @@ def compute_q_plasticity(
     logged_items = update_infos[0][0].keys()
 
     aggregate_infos = {}
-    for key in logged_items:
+    for key in tqdm.tqdm(logged_items, desc="Logging items", leave=False):
         aggregate_infos[key] = []
 
         for update_info in update_infos:
-            total_value = sum([np.array(info[key]) for info in update_info])
+            total_value = sum(np.array(info[key]) for info in update_info)
             mean_value = total_value / num_copies
             aggregate_infos[key].append(mean_value)
 
     df = pd.DataFrame(data=aggregate_infos)
 
-    fig = plt.figure()
-    ax = fig.add_subplot()
-    ax.plot(df["loss"])
+    plasticity_fig = plt.figure()
+    plasticity_ax = plasticity_fig.add_subplot()
+    plasticity_ax.plot(df["loss"])
+
+    grad_norm_keys = [key for key in logged_items if key.startswith("grad_norm/")]
+    grad_norm_fig = None
+    if grad_norm_keys:
+        grad_norm_fig = plt.figure()
+        grad_norm_ax = grad_norm_fig.add_subplot()
+        grad_norm_ax.plot(df[grad_norm_keys].mean(axis=1))
 
     return {
         "plasticity": -df["loss"].iloc[-1],
-        "plasticity_loss": fig,
+        "plasticity_loss": plasticity_fig,
         "initial_qs_mean": df["init_qs_mean"].mean(),
         "initial_qs_std": df["init_qs_std"].mean(),
+        "grad_norm": grad_norm_fig,
     }
