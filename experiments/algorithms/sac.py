@@ -5,6 +5,7 @@ import flax
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+from jax.tree_util import tree_map
 import numpy as np
 import optax
 
@@ -34,17 +35,20 @@ class SACAgent(flax.struct.PyTreeNode):
     config: dict = nonpytree_field()
 
     @jax.jit
-    def update(agent, batch: Batch):
-        new_rng, curr_key, next_key = jax.random.split(agent.rng, 3)
+    def mini_update(agent, batch: Batch):
+        new_rng, curr_key, next_key, redq_key = jax.random.split(agent.rng, 4)
 
         def critic_loss_fn(critic_params):
             next_dist = agent.actor(batch["next_observations"])
             next_actions, next_log_probs = next_dist.sample_and_log_prob(seed=next_key)
 
-            next_q1, next_q2 = agent.target_critic(
-                batch["next_observations"], next_actions
-            )
-            next_q = jnp.minimum(next_q1, next_q2)
+            # next_q1, next_q2 = agent.target_critic(
+            #     batch["next_observations"], next_actions
+            # )
+            # next_q = jnp.minimum(next_q1, next_q2)
+            next_qs = agent.target_critic(batch['next_observations'], next_actions)
+            next_qs = jax.random.permutation(redq_key, next_qs, axis=0)[:agent.config['num_min_qs']]
+            next_q = next_qs.min(axis=0)
             target_q = (
                 batch["rewards"] + agent.config["discount"] * batch["masks"] * next_q
             )
@@ -58,22 +62,27 @@ class SACAgent(flax.struct.PyTreeNode):
                     * agent.temp()
                 )
 
-            q1, q2 = agent.critic(
-                batch["observations"], batch["actions"], params=critic_params
-            )
-            critic_loss = ((q1 - target_q) ** 2 + (q2 - target_q) ** 2).mean()
+            qs = agent.critic(batch['observations'], batch['actions'], params=critic_params)
+            critic_loss = ((qs - target_q) ** 2).mean()
+            # q1, q2 = agent.critic(
+            #     batch["observations"], batch["actions"], params=critic_params
+            # )
+            # critic_loss = ((q1 - target_q) ** 2 + (q2 - target_q) ** 2).mean()
 
             return critic_loss, {
                 "critic_loss": critic_loss,
-                "q1": q1.mean(),
+                "q": qs.mean(),
             }
 
         def actor_loss_fn(actor_params):
             dist = agent.actor(batch["observations"], params=actor_params)
             actions, log_probs = dist.sample_and_log_prob(seed=curr_key)
 
-            q1, q2 = agent.critic(batch["observations"], actions)
-            q = jnp.minimum(q1, q2)
+            # q1, q2 = agent.critic(batch["observations"], actions)
+            # q = jnp.minimum(q1, q2)
+
+            qs = agent.critic(batch['observations'], actions)
+            q = qs.mean(axis=0)
 
             actor_loss = (log_probs * agent.temp() - q).mean()
             return actor_loss, {
@@ -116,6 +125,17 @@ class SACAgent(flax.struct.PyTreeNode):
             temp=new_temp,
         ), {**critic_info, **actor_info, **temp_info}
 
+
+    @functools.partial(jax.jit, static_argnames="utd_ratio")
+    def update(agent, batch: Batch, utd_ratio: int):
+        batch = tree_map(lambda x: x.reshape(utd_ratio, x.shape[0] // utd_ratio, *x.shape[1:]), batch)
+        
+        for i in range(utd_ratio):
+            mini_batch = tree_map(lambda x: x[i], batch)
+            agent, info = agent.mini_update(mini_batch)
+
+        return agent, info
+
     @jax.jit
     def sample_actions(
         agent,
@@ -141,6 +161,8 @@ def create_learner(
     tau: float = 0.005,
     target_entropy: float = None,
     backup_entropy: bool = True,
+    num_qs: int = 2,
+    num_min_qs: int = 2,
     **kwargs,
 ):
     print("Extra kwargs:", kwargs)
@@ -163,7 +185,7 @@ def create_learner(
         actor_def, actor_params, tx=optax.adam(learning_rate=actor_lr)
     )
 
-    critic_def = ensemblize(Critic, num_qs=2)(hidden_dims)
+    critic_def = ensemblize(Critic, num_qs=num_qs)(hidden_dims)
     critic_params = critic_def.init(critic_key, observations, actions)["params"]
     critic = TrainState.create(
         critic_def, critic_params, tx=optax.adam(learning_rate=critic_lr)
@@ -185,6 +207,8 @@ def create_learner(
             target_update_rate=tau,
             target_entropy=target_entropy,
             backup_entropy=backup_entropy,
+            num_qs=num_qs,
+            num_min_qs=num_min_qs,
         )
     )
 
@@ -211,5 +235,7 @@ def get_default_config():
             "tau": 0.005,
             "target_entropy": ml_collections.config_dict.placeholder(float),
             "backup_entropy": True,
+            "num_qs": 2,
+            "num_min_qs": 2,
         }
     )
