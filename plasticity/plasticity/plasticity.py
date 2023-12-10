@@ -123,7 +123,7 @@ def update_mse_perturb(
     initial_critic: TrainState,
     rand_critic: TrainState,
     batch: Batch,
-    freq: float = 1e5,
+    rand_weight: float = 10,
 ):
     def mse_loss_fn(params):
         obs, action = batch["observations"], batch["actions"]
@@ -132,7 +132,7 @@ def update_mse_perturb(
         rand_qs = rand_critic(obs, action, params=rand_critic.params).min(axis=0)
 
         # perturb_qs = init_qs + jnp.sin(freq * rand_qs)
-        perturb_qs = init_qs + init_qs.std() * 10 * rand_qs
+        perturb_qs = init_qs + init_qs.std() * rand_weight * rand_qs
         # perturb_qs = init_qs + 10 * rand_qs
         perturb_qs = jax.lax.stop_gradient(perturb_qs)
 
@@ -157,7 +157,7 @@ def group_update_mse_perturb(
     initial_critics: Sequence[TrainState],
     rand_critics: Sequence[TrainState],
     batch: Batch,
-    freq: float = 1e5,
+    rand_weight: float = 10,
 ):
     """
     Batch update critics to match target networks.
@@ -174,7 +174,7 @@ def group_update_mse_perturb(
             initial_critics[critic_idx],
             rand_critics[critic_idx],
             batch,
-            freq=freq,
+            rand_weight=rand_weight,
         )
         update_infos.append(update_info)
 
@@ -188,6 +188,7 @@ def compute_q_plasticity(
     num_copies: int = 20,
     num_train_steps: int = 5000,
     batch_size: int = 256,
+    rand_qs_weight = 10,
 ):
     """
     Compute the empirical plasticity of a train state using MSE loss on random targets
@@ -242,7 +243,7 @@ def compute_q_plasticity(
         #     critics, rand_critics, means=q_means, batch=batch, freq=10
         # )
         critics, update_info = group_update_mse_perturb(
-            critics, initial_critics, rand_critics, batch, freq=10
+            critics, initial_critics, rand_critics, batch, rand_weight=rand_qs_weight
         )
         update_infos.append(update_info)
 
@@ -271,7 +272,7 @@ def compute_q_plasticity(
         grad_norm_ax.plot(df[grad_norm_keys].mean(axis=1))
 
     return {
-        "plasticity": -df["loss"].iloc[-1],
+        "plasticity": -df["loss"].iloc[-100:].mean(),
         "plasticity_loss": plasticity_fig,
         "initial_qs_mean": df["init_qs_mean"].mean(),
         "initial_qs_std": df["init_qs_std"].mean(),

@@ -28,23 +28,24 @@ from jaxrl_m.wandb import default_wandb_config, get_flag_dict, setup_wandb
 from plasticity.plasticity import compute_q_plasticity
 
 FLAGS = flags.FLAGS
-flags.DEFINE_string("env_name", "PointMaze_UMaze-v3", "Environment name.")
-flags.DEFINE_string("reward_wrapper", None, "Optional reward wrapper type to use.")
-flags.DEFINE_string("reward_bonus", None, "Reward bonus type.")
-flags.DEFINE_string("save_dir", None, "Logging dir.")
-flags.DEFINE_string("load_dir", None, "Loading dir.")
-flags.DEFINE_integer("seed", np.random.choice(1000000), "Random seed.")
-flags.DEFINE_integer("eval_episodes", 10, "Number of episodes used for evaluation.")
-flags.DEFINE_integer("log_interval", 1000, "Logging interval.")
-flags.DEFINE_integer("eval_interval", 10000, "Eval interval.")
-flags.DEFINE_integer("save_interval", 25000, "Eval interval.")
-flags.DEFINE_integer("batch_size", 256, "Mini batch size.")
-flags.DEFINE_integer("buffer_size", int(1e6), "Replay buffer size.")
-flags.DEFINE_integer(
-    "random_buffer_size", int(1e5), "Buffer size for use in plasticity calculation."
-)
-flags.DEFINE_integer("max_steps", int(1e6), "Number of training steps.")
-flags.DEFINE_integer("start_steps", int(1e4), "Number of initial exploration steps.")
+if __name__ == "__main__":
+    flags.DEFINE_string("env_name", "PointMaze_UMaze-v3", "Environment name.")
+    flags.DEFINE_string("reward_wrapper", None, "Optional reward wrapper type to use.")
+    flags.DEFINE_string("reward_bonus", None, "Reward bonus type.")
+    flags.DEFINE_string("save_dir", None, "Logging dir.")
+    flags.DEFINE_string("load_dir", None, "Loading dir.")
+    flags.DEFINE_integer("seed", np.random.choice(1000000), "Random seed.")
+    flags.DEFINE_integer("eval_episodes", 10, "Number of episodes used for evaluation.")
+    flags.DEFINE_integer("log_interval", 1000, "Logging interval.")
+    flags.DEFINE_integer("eval_interval", 10000, "Eval interval.")
+    flags.DEFINE_integer("save_interval", 25000, "Eval interval.")
+    flags.DEFINE_integer("batch_size", 256, "Mini batch size.")
+    flags.DEFINE_integer("buffer_size", int(1e6), "Replay buffer size.")
+    flags.DEFINE_integer(
+        "random_buffer_size", int(1e5), "Buffer size for use in plasticity calculation."
+    )
+    flags.DEFINE_integer("max_steps", int(1e6), "Number of training steps.")
+    flags.DEFINE_integer("start_steps", int(1e4), "Number of initial exploration steps.")
 
 wandb_config = default_wandb_config()
 wandb_config.update(
@@ -55,10 +56,11 @@ wandb_config.update(
     }
 )
 
-config_flags.DEFINE_config_dict("wandb", wandb_config, lock_config=False)
-config_flags.DEFINE_config_dict(
-    "config", learner.get_default_config(), lock_config=False
-)
+if __name__ == "__main__":
+    config_flags.DEFINE_config_dict("wandb", wandb_config, lock_config=False)
+    config_flags.DEFINE_config_dict(
+        "config", learner.get_default_config(), lock_config=False
+    )
 
 
 def create_maze_env():

@@ -14,7 +14,7 @@ run_mujoco() {
 export -f run_mujoco
 
 # Test plasticity on 6 environments (3 normal, 3 inverted), 5 seeds, with the default reward function.
-parallel -j1 --delay 5s run_mujoco ::: "Hopper-v4" "HalfCheetah-v4" "Humanoid-v4" ::: 1 2 3 4 5 ::: "identity" ::: "None" ::: False True
+parallel --ungroup -j1 --delay 5s run_mujoco ::: "Hopper-v4" "HalfCheetah-v4" "Humanoid-v4" ::: 1 ::: "identity" ::: "None" ::: False True
 # run_mujoco "Hopper-v4" 1 "identity" "None" False
 
 # test plasticity on some simple environments
