@@ -65,6 +65,9 @@ def main(_):
             wandb.config.exp_prefix,
             wandb.config.experiment_id,
         )
+        # convert to absolute path
+        FLAGS.save_dir = os.path.abspath(FLAGS.save_dir)
+
         os.makedirs(FLAGS.save_dir, exist_ok=True)
         print(f"Saving config to {FLAGS.save_dir}/config.pkl")
         with open(os.path.join(FLAGS.save_dir, "config.pkl"), "wb") as f:
