@@ -36,11 +36,7 @@ class RND(flax.struct.PyTreeNode):
 
         phi1 = agent.network(obs_act)
         phi2 = agent.frozen_network(obs_act)
-        raw = ((phi1 - phi2) ** 2).mean(axis=-1)
-
-        max_r = raw.max()
-        min_r = raw.min()
-        rewards = (raw - min_r) / (max_r - min_r + 1e-6)
+        rewards = ((phi1 - phi2) ** 2).mean(axis=-1)
         return agent.rnd_coeff * rewards
 
 
@@ -49,8 +45,8 @@ def create_learner(
     observations: jnp.ndarray,
     actions: jnp.ndarray,
     learning_rate: float = 3e-4,
-    hidden_dims: Sequence[int] = (256, 256),
-    latent_dim: int = 128,
+    hidden_dims: Sequence[int] = (256, 256, 256),
+    latent_dim: int = 256,
     rnd_coeff: float = 1.0,
     **kwargs
 ):

@@ -6,6 +6,7 @@ import algorithms.rnd as rnd_learner
 import algorithms.sac as learner
 import gymnasium as gym
 import jax
+from jax.tree_util import tree_map
 import numpy as np
 import orbax.checkpoint
 import tqdm
@@ -14,7 +15,7 @@ from absl import app, flags
 from config import WANDB_DEFAULT_CONFIG
 from environments.maze.custom_maze import maze_map
 from environments.maze.visualize import visual_evaluate
-from environments.wrappers.antmaze import BoundedAntMaze
+from environments.wrappers.antmaze import BoundedAntMaze, D4RLWrapper
 from environments.wrappers.reward import AddGaussianReward, ConstantReward
 from flax.core.frozen_dict import freeze, unfreeze
 from flax.training import checkpoints
@@ -45,6 +46,7 @@ flags.DEFINE_integer(
 )
 flags.DEFINE_integer("max_steps", int(1e6), "Number of training steps.")
 flags.DEFINE_integer("start_steps", int(1e4), "Number of initial exploration steps.")
+flags.DEFINE_integer("utd_ratio", 1, "Update to data ratio.")
 
 wandb_config = default_wandb_config()
 wandb_config.update(
@@ -59,6 +61,27 @@ config_flags.DEFINE_config_dict("wandb", wandb_config, lock_config=False)
 config_flags.DEFINE_config_dict(
     "config", learner.get_default_config(), lock_config=False
 )
+
+
+def wrap_reward(env):
+    if FLAGS.reward_wrapper is not None:
+        if FLAGS.reward_wrapper == "identity":
+            wrapper = lambda x: x
+        elif FLAGS.reward_wrapper == "zero":
+            wrapper = partial(ConstantReward, reward=0.0)
+        elif FLAGS.reward_wrapper == "one":
+            wrapper = partial(ConstantReward, reward=1.0)
+        elif FLAGS.reward_wrapper == "unit_noise":
+            noise_rng, rng = jax.random.split(rng, 2)
+            wrapper = partial(
+                AddGaussianReward, rng=noise_rng, noise_mean=0.0, noise_std=1.0
+            )
+        else:
+            raise NotImplementedError
+
+        env = wrapper(env)
+
+    return env
 
 
 def create_maze_env():
@@ -81,25 +104,21 @@ def create_maze_env():
     env = BoundedAntMaze(env)
     env = EpisodeMonitor(env)
 
-    if FLAGS.reward_wrapper is not None:
-        if FLAGS.reward_wrapper == "identity":
-            wrapper = lambda x: x
-        elif FLAGS.reward_wrapper == "zero":
-            wrapper = partial(ConstantReward, reward=0.0)
-        elif FLAGS.reward_wrapper == "one":
-            wrapper = partial(ConstantReward, reward=1.0)
-        elif FLAGS.reward_wrapper == "unit_noise":
-            noise_rng, rng = jax.random.split(rng, 2)
-            wrapper = partial(
-                AddGaussianReward, rng=noise_rng, noise_mean=0.0, noise_std=1.0
-            )
-        else:
-            raise NotImplementedError
-
-        env = wrapper(env)
-
-    return env
+    return wrap_reward(env)
     
+
+def create_d4rl_antmaze():
+    import d4rl
+    import gym as ogym
+
+    FLAGS.env_name = 'antmaze-medium-diverse-v2'
+
+    env = ogym.make(FLAGS.env_name)
+    env = D4RLWrapper(env)
+    env = EpisodeMonitor(env)
+
+    return wrap_reward(env)
+
 
 def main(_):
     # Create wandb logger
@@ -112,6 +131,9 @@ def main(_):
             wandb.config.exp_prefix,
             wandb.config.experiment_id,
         )
+        # convert to absolute path
+        FLAGS.save_dir = os.path.abspath(FLAGS.save_dir)
+
         os.makedirs(FLAGS.save_dir, exist_ok=True)
         print(f"Saving config to {FLAGS.save_dir}/config.pkl")
         with open(os.path.join(FLAGS.save_dir, "config.pkl"), "wb") as f:
@@ -119,8 +141,10 @@ def main(_):
 
     rng = jax.random.PRNGKey(FLAGS.seed)
     
-    env = create_maze_env()
-    eval_env = create_maze_env()
+    env = create_d4rl_antmaze()
+    eval_env = create_d4rl_antmaze()
+    # env = create_maze_env()
+    # eval_env = create_maze_env()
 
     example_transition = dict(
         observations=env.observation_space.sample(),
@@ -133,23 +157,6 @@ def main(_):
     replay_buffer = ReplayBuffer.create(example_transition, size=FLAGS.buffer_size)
 
     exploration_rng, plasticity_rng = jax.random.split(rng, 2)
-
-    plasticity_dataset = ReplayBuffer.create(
-        example_transition, size=FLAGS.random_buffer_size
-    )
-    for _ in tqdm.tqdm(range(FLAGS.random_buffer_size), desc="Generating random data"):
-        obs = env.observation_space.sample()
-        next_obs = env.observation_space.sample()
-        action = env.action_space.sample()
-        plasticity_dataset.add_transition(
-            dict(
-                observations=obs,
-                actions=action,
-                rewards=0.0,
-                masks=1.0,
-                next_observations=next_obs,
-            )
-        )
     
     explore_agent = learner.create_learner(
         FLAGS.seed,
@@ -198,20 +205,21 @@ def main(_):
                 action = explore_agent.sample_actions(obs, seed=key)
             else:
                 action = evaluate_agent.sample_actions(obs, seed=key)
+            action = explore_agent.sample_actions(obs, seed=key)
 
         next_obs, reward, term, trunc, info = env.step(action)
         done = term or trunc
         mask = float(not term)
 
-        replay_buffer.add_transition(
-            dict(
-                observations=obs,
-                actions=action,
-                rewards=reward,
-                masks=mask,
-                next_observations=next_obs,
-            )
+        trans = dict(
+            observations=obs,
+            actions=action,
+            rewards=reward,
+            masks=mask,
+            next_observations=next_obs,
         )
+
+        replay_buffer.add_transition(trans)
         obs = next_obs
 
         if done:
@@ -224,39 +232,35 @@ def main(_):
         if replay_buffer.size < FLAGS.start_steps:
             continue
 
-        batch = replay_buffer.sample(FLAGS.batch_size)
-        evaluate_agent, update_info = evaluate_agent.update(batch)
+        batch = replay_buffer.sample(FLAGS.batch_size * FLAGS.utd_ratio)
+        # evaluate_agent, update_info = evaluate_agent.update(batch, utd_ratio=FLAGS.utd_ratio)
         
         if FLAGS.reward_bonus == 'rnd':
             batch = unfreeze(batch)
             batch['rewards'] += rnd.get_rewards(batch)
             batch = freeze(batch)
 
-        explore_agent, update_info = explore_agent.update(batch)
-        rnd, rnd_update_info = rnd.update(batch)
+        explore_agent, update_info = explore_agent.update(batch, utd_ratio=FLAGS.utd_ratio)
+
+        if replay_buffer.size >= FLAGS.start_steps:
+            rnd, rnd_update_info = rnd.update(trans)
+            update_info.update({f'rnd/{k}': v for k, v in rnd_update_info.items()})
 
         if i % FLAGS.log_interval == 0:
             train_metrics = {f"training/{k}": v for k, v in update_info.items()}
-            rnd_train_metrics = {f"training/rnd/{k}": v for k, v in rnd_update_info.items()}
             wandb.log(train_metrics, step=i)
-            wandb.log(rnd_train_metrics, step=i)
             wandb.log(exploration_metrics, step=i)
             exploration_metrics = dict()
 
         if i % FLAGS.eval_interval == 0:
-            evaluate_policy_fn = partial(supply_rng(evaluate_agent.sample_actions), temperature=0.0)
-            eval_info = visual_evaluate(evaluate_policy_fn, eval_env, num_episodes=FLAGS.eval_episodes)
+            # evaluate_policy_fn = partial(supply_rng(evaluate_agent.sample_actions), temperature=0.0)
+            # eval_info = visual_evaluate(evaluate_policy_fn, eval_env, num_episodes=FLAGS.eval_episodes)
 
             explore_policy_fn = partial(supply_rng(explore_agent.sample_actions), temperature=0.0)
             eval_explore_info = visual_evaluate(explore_policy_fn, eval_env, num_episodes=FLAGS.eval_episodes)
-            
-            # rng_key, plasticity_rng = jax.random.split(plasticity_rng, 2)
-            # plasticity_info = compute_q_plasticity(
-            #     rng_key, agent.critic, plasticity_dataset, batch_size=FLAGS.batch_size
-            # )
-            # eval_info.update(plasticity_info)
 
-            eval_metrics = {f"evaluation/evaluate/{k}": v for k, v in eval_info.items()}
+            # eval_metrics = {f"evaluation/evaluate/{k}": v for k, v in eval_info.items()}
+            eval_metrics = {}
             eval_metrics.update({f"evaluation/explore/{k}": v for k, v in eval_explore_info.items()})
             wandb.log(eval_metrics, step=i)
 

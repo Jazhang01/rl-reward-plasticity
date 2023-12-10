@@ -10,7 +10,14 @@ run_maze() {
         --save_interval=50000 \
         --buffer_size=500000 \
         --random_buffer_size=100000 \
-        --batch_size=128
+        --start_steps=5000 \
+        --batch_size=256 \
+        --utd_ratio=5 \
+        --config.hidden_dims="(256,256,256)" \
+        --config.backup_entropy=False \
+        --config.num_qs=10 \
+        --config.num_min_qs=1 \
+        --config.use_layer_norm=True 
 }
 export -f run_maze
 
