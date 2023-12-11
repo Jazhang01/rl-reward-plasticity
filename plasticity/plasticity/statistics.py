@@ -7,118 +7,15 @@ from typing import Sequence
 import jax
 import jax.numpy as jnp
 import jax.numpy.linalg
+import tqdm
 from jax.tree_util import DictKey, SequenceKey
 
 from jaxrl_m.common import TrainState
 from jaxrl_m.dataset import ReplayBuffer
 from jaxrl_m.typing import Batch, PRNGKey
+from plasticity.util.grads import unbatched_grads
+from plasticity.util.hessian import compute_hessian_density
 from plasticity.util.kmeans import kmeans_jit
-
-
-def _gradients(rng: PRNGKey, agent: TrainState, batch: Batch, loss_fn: str = "critic"):
-    """
-    Compute gradients of a critic using the given batch.
-
-    Parameters
-    ----------
-    rng : PRNGKey
-        Key for randomness
-
-    agent : TrainState
-        Agent containing the critic to compute the gradients for.
-        The agent's actor network is used to determine the targets for gradient calculations.
-
-    batch
-        Batch to take the gradients with.
-    """
-
-    def critic_loss_fn(critic_params):
-        """
-        Compute the critic loss.
-
-        TODO: this is copied directly from the sac agent; perhaps extract to avoid redundancy?
-        """
-        next_dist = agent.actor(batch["next_observations"])
-        next_actions, next_log_probs = next_dist.sample_and_log_prob(seed=rng)
-
-        next_q1, next_q2 = agent.target_critic(batch["next_observations"], next_actions)
-        next_q = jnp.minimum(next_q1, next_q2)
-        target_q = batch["rewards"] + agent.config["discount"] * batch["masks"] * next_q
-
-        if agent.config["backup_entropy"]:
-            target_q = (
-                target_q
-                - agent.config["discount"]
-                * batch["masks"]
-                * next_log_probs
-                * agent.temp()
-            )
-
-        q1, q2 = agent.critic(
-            batch["observations"], batch["actions"], params=critic_params
-        )
-        critic_loss = ((q1 - target_q) ** 2 + (q2 - target_q) ** 2).mean()
-
-        return critic_loss, {
-            "critic_loss": critic_loss.mean(),
-            "q1": q1.mean(),
-            "q2": q2.mean(),
-        }
-
-    def identity_loss_fn(critic_params):
-        """
-        Return the Q-values as the identity loss function for gradient calculations.
-        """
-        q1, q2 = agent.critic(
-            batch["observations"], batch["actions"], params=critic_params
-        )
-        identity_loss = (q1 + q2).mean()
-        return identity_loss, {
-            "critic_loss": identity_loss.mean(),
-            "q1": q1.mean(),
-            "q2": q2.mean(),
-        }
-
-    # compute gradient of the loss function with respect to the critic parameters
-    if loss_fn == "critic":
-        grads, info = jax.grad(critic_loss_fn, has_aux=True)(agent.critic.params)
-    elif loss_fn == "identity":
-        grads, info = jax.grad(identity_loss_fn, has_aux=True)(agent.critic.params)
-    else:
-        raise ValueError("Invalid loss function")
-
-    return grads, info
-
-
-def unbatched_grads(
-    rng: PRNGKey, agent: TrainState, batch: Batch, batch_size: int, loss_fn="critic"
-):
-    """
-    Convert dict of (batch, *) arrays into a batch-length list of dicts.
-    Also unensemblizes all of the gradients (i.e. the leaves do not have an ensemble dimension).
-    """
-
-    # convert dict of (batch, *) arrays into a batch-length list of dicts
-    batch_list = [{k: arr[i] for k, arr in batch.items()} for i in range(batch_size)]
-
-    grad_tree = []
-    for batch_item in batch_list:
-        rng, grads_key = jax.random.split(rng, 2)
-        grads, _ = _gradients(grads_key, agent, batch_item, loss_fn=loss_fn)
-
-        # first dimension in each leaf is the ensemble size; we want to split this up
-        unensemblized_grads = unensemblize_grads(grads)
-        grad_tree.append(unensemblized_grads)
-
-    return grad_tree
-
-
-def unensemblize_grads(grads):
-    """
-    By default, the gradients are grouped with the first dimension being the ensemble size.
-    This function extracts the ensembles out into a list, allowing for tree_map to act on each critic individually.
-    """
-    return jax.tree_map(lambda arr: [ensemble_critic for ensemble_critic in arr], grads)
 
 
 def order_batch_by_similarity(rng: PRNGKey, batch: Batch, k: int = 10):
@@ -221,6 +118,23 @@ def dead_unit_count(grads_tree: Sequence[dict], threshold=1e-5):
     return num_dead_units
 
 
+def hessian_eigenvals(rng: PRNGKey, agent: TrainState, batch: Batch):
+    eig_vals, density, grids = compute_hessian_density(rng, agent, batch)
+
+    max_eig_val = jnp.max(eig_vals)
+    min_eig_val = jnp.min(eig_vals)
+
+    condition_number = max_eig_val / min_eig_val
+
+    return {
+        "max_eigenvalue": max_eig_val,
+        "min_eigenvalue": min_eig_val,
+        "condition_number": condition_number,
+        "_density": density,
+        "_density_grid": grids,
+    }
+
+
 def get_path_key(key) -> str:
     if isinstance(key, DictKey):
         return str(key.key)
@@ -242,40 +156,57 @@ def compute_statistics(
     initial_replay_buffer: ReplayBuffer,
     replay_buffer: ReplayBuffer,
     gradient_cov_batch_size: int = 256,
+    hessian_batch_size: int = 1024,
     dead_unit_batch_size: int = 1024,
     dead_unit_threshold=1e-5,
 ):
     """
     Returns a nested dict, where the second level dictionary is a flattened dict containing all the relevant statistics.
     """
-    grads_key, grad_cov_key = jax.random.split(rng, 2)
+    grads_key, grad_cov_key, hessian_key = jax.random.split(rng, 3)
 
     gradient_cov_grads_batch = replay_buffer.sample(gradient_cov_batch_size)
     dead_unit_grads_batch = initial_replay_buffer.sample(dead_unit_batch_size)
+    hessian_batch = replay_buffer.sample(hessian_batch_size)
 
-    # compute batch gradients
-    # grads, _ = _gradients(grads_key, agent, grads_batch)
-    # compute individual gradients
-    gradient_cov_grads_tree = unbatched_grads(
-        grads_key, agent, gradient_cov_grads_batch, gradient_cov_batch_size
-    )
+    with tqdm.tqdm(total=4, leave=False) as progress_bar:
+        progress_bar.set_description("Computing gradients")
+        # compute batch gradients
+        # grads, _ = _gradients(grads_key, agent, grads_batch)
+        # compute individual gradients
+        gradient_cov_grads_tree = unbatched_grads(
+            grads_key, agent, gradient_cov_grads_batch, gradient_cov_batch_size
+        )
 
-    dead_unit_grads_tree = unbatched_grads(
-        grads_key,
-        agent,
-        dead_unit_grads_batch,
-        dead_unit_batch_size,
-        loss_fn="identity",
-    )
+        dead_unit_grads_tree = unbatched_grads(
+            grads_key,
+            agent,
+            dead_unit_grads_batch,
+            dead_unit_batch_size,
+            loss_fn="identity",
+        )
+        progress_bar.update(1)
 
-    grad_cov = gradient_covariance(
-        grad_cov_key, gradient_cov_grads_batch, gradient_cov_grads_tree
-    )
-    grad_cov_flattened = flatten_tree(grad_cov)
+        progress_bar.set_description("Computing gradient covariance matrix")
+        grad_cov = gradient_covariance(
+            grad_cov_key, gradient_cov_grads_batch, gradient_cov_grads_tree
+        )
+        grad_cov_flattened = flatten_tree(grad_cov)
+        progress_bar.update(1)
 
-    num_dead_units = dead_unit_count(
-        dead_unit_grads_tree, threshold=dead_unit_threshold
-    )
-    num_dead_units_flattened = flatten_tree(num_dead_units)
+        progress_bar.set_description("Computing dead unit count")
+        num_dead_units = dead_unit_count(
+            dead_unit_grads_tree, threshold=dead_unit_threshold
+        )
+        num_dead_units_flattened = flatten_tree(num_dead_units)
+        progress_bar.update(1)
 
-    return {"grad_cov": grad_cov_flattened, "dead_unit_count": num_dead_units_flattened}
+        progress_bar.set_description("Computing Hessian eigenvalues")
+        hessian_eigenvals_info = hessian_eigenvals(hessian_key, agent, hessian_batch)
+        progress_bar.update(1)
+
+    return {
+        "grad_cov": grad_cov_flattened,
+        "dead_unit_count": num_dead_units_flattened,
+        "hessian_eigenvalues": hessian_eigenvals_info,
+    }

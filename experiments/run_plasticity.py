@@ -32,11 +32,6 @@ if __name__ == "__main__":
     flags.DEFINE_string(
         "checkpoints", None, "Path to a folder of checkpoints and saved replay buffers."
     )
-    flags.DEFINE_string(
-        "buffer",
-        None,
-        "Path to the final saved replay buffer, to be used in plasticity calculations.",
-    )
     flags.DEFINE_integer("batch_size", 256, "Batch size.")
 
     flags.DEFINE_float(
@@ -57,6 +52,9 @@ if __name__ == "__main__":
     )
     flags.DEFINE_integer(
         "dead_unit_batch_size", 1024, "Batch size for dead unit calculation."
+    )
+    flags.DEFINE_integer(
+        "hessian_batch_size", 1024, "Batch size used for Hessian calculations."
     )
 
     # flags from mujoco env
@@ -160,6 +158,7 @@ def main(_):
                 next_observations=next_obs,
             )
         )
+
     # with open(FLAGS.buffer, "rb") as f:
     #     final_dataset_raw = pickle.load(f)
     #     final_dataset = ReplayBuffer.create_from_initial_dataset(
@@ -212,6 +211,7 @@ def main(_):
             gradient_cov_batch_size=FLAGS.gradient_cov_batch_size,
             dead_unit_batch_size=FLAGS.dead_unit_batch_size,
             dead_unit_threshold=FLAGS.dead_unit_threshold,
+            hessian_batch_size=FLAGS.hessian_batch_size,
         )
 
         num_dead_units = statistics["dead_unit_count"]
@@ -235,11 +235,30 @@ def main(_):
         info.update(grad_cov_figs)
         info.update(grad_cov_ranks)
 
+        # generate visualization of Hessian eigenvalues
+        hessian_eigenvalues = statistics["hessian_eigenvalues"]
+        hessian_eigvals_fig = plt.figure()
+        hessian_eigvals_ax = hessian_eigvals_fig.gca()
+        hessian_eigvals_ax.semilogy(
+            hessian_eigenvalues["_density_grid"], hessian_eigenvalues["_density"]
+        )
+        info.update(
+            {
+                **{
+                    f"hessian/{k}": v
+                    for k, v in hessian_eigenvalues.items()
+                    if not k.startswith("_")
+                },
+                "hessian/density": hessian_eigvals_fig,
+            }
+        )
+
         wandb.log(info, step=step)
 
         # close all figures before moving on to the next step
         for fig in grad_cov_figs.values():
             plt.close(fig)
+        plt.close(hessian_eigvals_fig)
 
         del checkpoint_dataset_raw
         del checkpoint_dataset
