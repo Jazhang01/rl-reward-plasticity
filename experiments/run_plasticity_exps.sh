@@ -23,28 +23,31 @@ run_mujoco() {
 }
 export -f run_mujoco
 
-parallel --ungroup -j1 --delay 5s run_plasticity \
-    ::: \
-    "Humanoid-v4" \
-    ::: \
-    checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_Humanoid-v4_20231209_211215 \
-    ::: \
-    checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_Humanoid-v4_20231209_211215/buffer_500000.pkl \
-    ::: \
-    10 100 1000
+run_plasticity "Humanoid-v4" "checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_Humanoid-v4_20231209_211215" "checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_Humanoid-v4_20231209_211215/buffer_25000.pkl" 10
+# run_plasticity "Hopper-v4" "checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_Hopper-v4_20231209_200602" "checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_Hopper-v4_20231209_200602/buffer_500000.pkl" 10
 
-parallel --ungroup -j1 --delay 5s run_plasticity \
-    ::: \
-    "Hopper-v4" \
-    ::: \
-    checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_Hopper-v4_20231209_200602 \
-    ::: \
-    checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_Hopper-v4_20231209_200602/buffer_500000.pkl \
-    ::: \
-    50 100 1000
-
-parallel --ungroup -j1 --delay 5s run_mujoco \
-    ::: "Hopper-v4" "HalfCheetah-v4" "Humanoid-v4" \
-    ::: 1 \
-    ::: "identity" \
-    ::: "None"
+# parallel --ungroup -j1 --delay 5s run_plasticity \
+#     ::: \
+#     "Humanoid-v4" \
+#     ::: \
+#     checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_Humanoid-v4_20231209_211215 \
+#     ::: \
+#     checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_Humanoid-v4_20231209_211215/buffer_500000.pkl \
+#     ::: \
+#     10 100 1000
+# 
+# parallel --ungroup -j1 --delay 5s run_plasticity \
+#     ::: \
+#     "Hopper-v4" \
+#     ::: \
+#     checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_Hopper-v4_20231209_200602 \
+#     ::: \
+#     checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_Hopper-v4_20231209_200602/buffer_500000.pkl \
+#     ::: \
+#     50 100 1000
+# 
+# parallel --ungroup -j1 --delay 5s run_mujoco \
+#     ::: "Hopper-v4" "HalfCheetah-v4" "Humanoid-v4" \
+#     ::: 1 \
+#     ::: "identity" \
+#     ::: "None"

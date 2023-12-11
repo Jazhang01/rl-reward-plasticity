@@ -25,21 +25,6 @@ from jaxrl_m.evaluation import EpisodeMonitor
 from jaxrl_m.wandb import default_wandb_config, get_flag_dict, setup_wandb
 from plasticity.plasticity import compute_q_plasticity
 
-wandb_config = default_wandb_config()
-wandb_config.update(
-    {
-        **WANDB_DEFAULT_CONFIG,
-        "group": "plasticity",
-        "name": "plasticity_{env_name}",
-    }
-)
-
-if __name__ == "__main__":
-    config_flags.DEFINE_config_dict("wandb", wandb_config, lock_config=False)
-    config_flags.DEFINE_config_dict(
-        "config", learner.get_default_config(), lock_config=False
-    )
-
 FLAGS = flags.FLAGS
 if __name__ == "__main__":
     flags.DEFINE_string("env_name", None, "Environment name.")
@@ -57,12 +42,44 @@ if __name__ == "__main__":
     flags.DEFINE_float(
         "rand_qs_weight", 10, "Weight for the random perturbation of the Q-values."
     )
+    flags.DEFINE_integer(
+        "random_buffer_size", int(1e5), "Buffer size to use in plasticity calculation."
+    )
+
+    # flags for statistics
+    flags.DEFINE_integer(
+        "gradient_cov_batch_size", 256, "Batch size for gradient covariance matrix."
+    )
+    flags.DEFINE_float(
+        "dead_unit_threshold",
+        1e-5,
+        "Threshold for gradients in dead unit calculations.",
+    )
+    flags.DEFINE_integer(
+        "dead_unit_batch_size", 1024, "Batch size for dead unit calculation."
+    )
 
     # flags from mujoco env
     flags.DEFINE_boolean(
         "invert_env", False, "Invert the objective of the environment."
     )
     flags.DEFINE_string("reward_wrapper", None, "Optional reward wrapper type to use.")
+
+
+wandb_config = default_wandb_config()
+wandb_config.update(
+    {
+        **WANDB_DEFAULT_CONFIG,
+        "group": "plasticity",
+        "name": "plasticity_{env_name}",
+    }
+)
+
+if __name__ == "__main__":
+    config_flags.DEFINE_config_dict("wandb", wandb_config, lock_config=False)
+    config_flags.DEFINE_config_dict(
+        "config", learner.get_default_config(), lock_config=False
+    )
 
 
 def main(_):
@@ -80,7 +97,6 @@ def main(_):
 
     checkpoint_files = {}
     dataset_files = {}
-    final_dataset = None
 
     if FLAGS.env_name.startswith("PointMaze"):
         env = create_maze_env()
@@ -124,14 +140,38 @@ def main(_):
 
     sorted_steps = sorted(checkpoint_files.keys())
 
-    with open(FLAGS.buffer, "rb") as f:
-        final_dataset_raw = pickle.load(f)
-        final_dataset = ReplayBuffer.create_from_initial_dataset(
-            final_dataset_raw, size=get_size(final_dataset_raw)
-        )
-
     rng = jax.random.PRNGKey(seed=FLAGS.seed)
-    rng, key = jax.random.split(rng, 2)
+    rng, plasticity_key, statistics_key = jax.random.split(rng, 3)
+
+    plasticity_dataset = ReplayBuffer.create(
+        example_transition, size=FLAGS.random_buffer_size
+    )
+    for _ in tqdm.tqdm(range(FLAGS.random_buffer_size), desc="Generating random data"):
+        rng, obs_key, next_obs_key, action_key = jax.random.split(rng, 4)
+        obs = jax.random.normal(obs_key, env.observation_space.shape)
+        next_obs = jax.random.normal(next_obs_key, env.observation_space.shape)
+        action = jax.random.normal(action_key, env.action_space.shape)
+        plasticity_dataset.add_transition(
+            dict(
+                observations=obs,
+                actions=action,
+                rewards=0.0,
+                masks=1.0,
+                next_observations=next_obs,
+            )
+        )
+    # with open(FLAGS.buffer, "rb") as f:
+    #     final_dataset_raw = pickle.load(f)
+    #     final_dataset = ReplayBuffer.create_from_initial_dataset(
+    #         final_dataset_raw, size=get_size(final_dataset_raw)
+    #     )
+
+    initial_dataset_filename = dataset_files[sorted_steps[0]]
+    with open(initial_dataset_filename, "rb") as initial_dataset_file:
+        initial_dataset_raw = pickle.load(initial_dataset_file)
+        initial_dataset = ReplayBuffer.create_from_initial_dataset(
+            initial_dataset_raw, size=get_size(initial_dataset_raw)
+        )
 
     progress_bar = tqdm.tqdm(sorted_steps)
     for step in progress_bar:
@@ -154,41 +194,38 @@ def main(_):
 
         # compute plasticity
         plasticity_info = compute_q_plasticity(
-            key,
+            plasticity_key,
             agent.critic,
-            final_dataset,
+            replay_buffer=plasticity_dataset,
+            checkpoint_replay_buffer=checkpoint_dataset,
             batch_size=FLAGS.batch_size,
             rand_qs_weight=FLAGS.rand_qs_weight,
         )
         info.update({f"plasticity/{k}": v for k, v in plasticity_info.items()})
 
         # compute other statistics
-        gradient_cov = plasticity.statistics.gradient_covariance(
-            key,
+        statistics = plasticity.statistics.compute_statistics(
+            statistics_key,
             agent,
-            checkpoint_dataset,
-            batch_size=FLAGS.batch_size,
+            initial_replay_buffer=initial_dataset,
+            replay_buffer=checkpoint_dataset,
+            gradient_cov_batch_size=FLAGS.gradient_cov_batch_size,
+            dead_unit_batch_size=FLAGS.dead_unit_batch_size,
+            dead_unit_threshold=FLAGS.dead_unit_threshold,
         )
 
-        def get_path_key(key):
-            if isinstance(key, DictKey):
-                return key.key
-            elif isinstance(key, SequenceKey):
-                return str(key.idx)
-            return ""
+        num_dead_units = statistics["dead_unit_count"]
+        info.update({f"dead_unit_count/{k}": v for k, v in num_dead_units.items()})
 
-        grad_cov_flattened = {
-            ".".join(get_path_key(k) for k in path): mat
-            for path, mat in jax.tree_util.tree_leaves_with_path(gradient_cov)
-        }
+        gradient_cov = statistics["grad_cov"]
 
         # generate visualization for the gradient covariance matrix
         grad_cov_figs = {}
         grad_cov_ranks = {}
-        for param, grad_cov_mat in grad_cov_flattened.items():
+        for param, grad_cov_mat in gradient_cov.items():
             grad_cov_fig = plt.figure(figsize=(8, 8))
             grad_cov_ax = grad_cov_fig.gca()
-            grad_cov_fig_mat = grad_cov_ax.matshow(grad_cov_mat)
+            grad_cov_fig_mat = grad_cov_ax.matshow(grad_cov_mat, cmap="RdBu")
             grad_cov_fig.colorbar(grad_cov_fig_mat)
 
             grad_cov_figs[f"grad_cov_figs/{param}"] = grad_cov_fig
