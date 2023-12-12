@@ -1,7 +1,7 @@
 import os
 import pickle
 
-import algorithms.redq as learner
+import algorithms.sac as learner
 import gymnasium as gym
 import jax
 import jax.numpy.linalg
