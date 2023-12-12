@@ -123,16 +123,22 @@ def update_mse_perturb(
     initial_critic: TrainState,
     rand_critic: TrainState,
     batch: Batch,
-    freq: float = 1e5,
+    rand_weight: float = 10,
+    rand_qs_mean=0,
+    rand_qs_std=1,
 ):
+    """
+    Updates the critic with randomly perturbed targets.
+    """
     def mse_loss_fn(params):
         obs, action = batch["observations"], batch["actions"]
-        qs = critic(obs, action, params=params).min(axis=0)
-        init_qs = initial_critic(obs, action, params=initial_critic.params).min(axis=0)
-        rand_qs = rand_critic(obs, action, params=rand_critic.params).min(axis=0)
+        qs = critic(obs, action, params=params).mean(axis=0)
+        init_qs = initial_critic(obs, action, params=initial_critic.params).mean(axis=0)
+        rand_qs = rand_critic(obs, action, params=rand_critic.params).mean(axis=0)
+        normalized_rand_qs = (rand_qs - rand_qs_mean) / (rand_qs_std + 1e-6)
 
         # perturb_qs = init_qs + jnp.sin(freq * rand_qs)
-        perturb_qs = init_qs + init_qs.std() * 10 * rand_qs
+        perturb_qs = init_qs + init_qs.std() * rand_weight * normalized_rand_qs
         # perturb_qs = init_qs + 10 * rand_qs
         perturb_qs = jax.lax.stop_gradient(perturb_qs)
 
@@ -141,9 +147,16 @@ def update_mse_perturb(
 
         info = {
             "loss": loss,
+            "qs_mean": qs.mean(),
+            "qs_std": qs.std(),
             "init_qs_mean": init_qs.mean(),
             "init_qs_std": init_qs.std(),
-            "perturb_qs": perturb_qs,
+            "rand_qs_mean": rand_qs.mean(),
+            "rand_qs_std": rand_qs.std(),
+            "normalized_rand_qs_mean": normalized_rand_qs.mean(),
+            "normalized_rand_qs_std": normalized_rand_qs.std(),
+            "perturb_qs_mean": perturb_qs.mean(),
+            "perturb_qs_std": perturb_qs.std(),
         }
         return loss, info
 
@@ -157,7 +170,9 @@ def group_update_mse_perturb(
     initial_critics: Sequence[TrainState],
     rand_critics: Sequence[TrainState],
     batch: Batch,
-    freq: float = 1e5,
+    rand_weight: float = 10,
+    rand_qs_mean=0,
+    rand_qs_std=1,
 ):
     """
     Batch update critics to match target networks.
@@ -174,20 +189,118 @@ def group_update_mse_perturb(
             initial_critics[critic_idx],
             rand_critics[critic_idx],
             batch,
-            freq=freq,
+            rand_weight=rand_weight,
+            rand_qs_mean=rand_qs_mean,
+            rand_qs_std=rand_qs_std,
         )
         update_infos.append(update_info)
 
     return new_critics, update_infos
 
 
+def compute_rand_qs_stats(
+    replay_buffer: ReplayBuffer,
+    rand_critics: Sequence[TrainState],
+    buffer_stats,
+    batch_size: int = 256,
+    num_samples: int = 5000,
+):
+    """
+    Samples from the replay buffer to get an estimate of the mean and standard deviation
+    of the random critics.
+    """
+
+    @jax.jit
+    def compute_rand_qs(obs, action):
+        return jnp.array(
+            [critic(obs, action, params=critic.params) for critic in rand_critics]
+        )
+
+    total_mean = 0
+    total_std = 0
+    for _ in tqdm.trange(
+        num_samples, desc="Sampling rand_qs for mean/std computation", leave=False
+    ):
+        batch = replay_buffer.sample(batch_size)
+        batch = rescale_batch(batch, buffer_stats)
+
+        obs, action = batch["observations"], batch["actions"]
+        rand_qs = compute_rand_qs(obs, action)
+        total_mean += jnp.mean(rand_qs)
+        total_std += jnp.std(rand_qs)
+
+    return total_mean / num_samples, total_std / num_samples
+
+
+def compute_buffer_stats(
+    replay_buffer: ReplayBuffer, batch_size: int = 256, num_samples: int = 5000
+):
+    """
+    Samples the replay buffer to find the mean and standard deviation of the observations and actions.
+    """
+
+    @jax.jit
+    def compute_stats(batch):
+        obs, action = batch["observations"], batch["actions"]
+        return {
+            "obs": (obs.mean(), obs.std()),
+            "acs": (action.mean(), action.std()),
+        }
+
+    obs_total_mean = 0
+    obs_total_std = 0
+    acs_total_mean = 0
+    acs_total_std = 0
+    for _ in tqdm.trange(
+        num_samples, desc="Sampling replay buffer for mean/std computation", leave=False
+    ):
+        batch = replay_buffer.sample(batch_size)
+        stats = compute_stats(batch)
+        obs_total_mean += stats["obs"][0]
+        obs_total_std += stats["obs"][1]
+        acs_total_mean += stats["acs"][0]
+        acs_total_std += stats["acs"][1]
+
+    return {
+        "obs": (obs_total_mean / num_samples, obs_total_std / num_samples),
+        "acs": (acs_total_mean / num_samples, acs_total_std / num_samples),
+    }
+
+
+@jax.jit
+def rescale_batch(batch, buffer_stats):
+    """
+    Rescale a batch according to the buffer stats.
+    """
+    if buffer_stats is None:
+        return
+
+    obs, acs = batch["observations"], batch["actions"]
+
+    # rescale obs and action based on buffer stats
+    obs_mean, obs_std = buffer_stats["obs"]
+    acs_mean, acs_std = buffer_stats["acs"]
+    obs = obs * obs_std + obs_mean
+    acs = acs * acs_std + acs_mean
+
+    new_batch = {
+        **batch,
+        "observations": obs,
+        "actions": acs
+    }
+
+    return new_batch
+
+
 def compute_q_plasticity(
     rng: PRNGKey,
     critic: TrainState,
     replay_buffer: ReplayBuffer,
+    checkpoint_replay_buffer: ReplayBuffer,
     num_copies: int = 20,
-    num_train_steps: int = 5000,
+    num_train_steps: int = 2000,
     batch_size: int = 256,
+    rand_qs_weight=10,
 ):
     """
     Compute the empirical plasticity of a train state using MSE loss on random targets
@@ -232,17 +345,34 @@ def compute_q_plasticity(
     #     qs = critic(q_mean_batch["observations"], q_mean_batch["actions"]).min(axis=0)
     #     q_means.append(qs.mean().item())
 
+    buffer_stats = compute_buffer_stats(checkpoint_replay_buffer, batch_size=batch_size)
+
+    # compute rand qs stats with the rescaled bufffer
+    rand_qs_mean, rand_qs_std = compute_rand_qs_stats(
+        replay_buffer, rand_critics, batch_size=batch_size, buffer_stats=buffer_stats
+    )
+
+    # get random perturbation to observations
+    # obs_perturb = jax.random.normal(rand_key, batch["observations"][0].shape)
+
     # train the copied train states to match the k new critics
     update_infos = []
     for _ in tqdm.tqdm(
         range(num_train_steps), desc="Computing plasticity", leave=False
     ):
         batch = replay_buffer.sample(batch_size)
+        batch = rescale_batch(batch, buffer_stats)
         # critics, update_info = group_update_mse_lyle(
         #     critics, rand_critics, means=q_means, batch=batch, freq=10
         # )
         critics, update_info = group_update_mse_perturb(
-            critics, initial_critics, rand_critics, batch, freq=10
+            critics,
+            initial_critics,
+            rand_critics,
+            batch,
+            rand_weight=rand_qs_weight,
+            rand_qs_mean=rand_qs_mean,
+            rand_qs_std=rand_qs_std,
         )
         update_infos.append(update_info)
 
@@ -271,9 +401,30 @@ def compute_q_plasticity(
         grad_norm_ax.plot(df[grad_norm_keys].mean(axis=1))
 
     return {
-        "plasticity": -df["loss"].iloc[-1],
+        # plasticity statistics
+        "plasticity": -df["loss"].iloc[-100:].mean(),
         "plasticity_loss": plasticity_fig,
+        # learned Q-values statistics
+        "qs_mean": df["qs_mean"].mean(),
+        "qs_std": df["qs_std"].mean(),
+        # initial Q-values statistics
         "initial_qs_mean": df["init_qs_mean"].mean(),
         "initial_qs_std": df["init_qs_std"].mean(),
+        # random Q-values statistics
+        "rand_qs_dataset_mean": rand_qs_mean,
+        "rand_qs_dataset_std": rand_qs_std,
+        "rand_qs_mean": df["rand_qs_mean"].mean(),
+        "rand_qs_std": df["rand_qs_std"].mean(),
+        "normalized_rand_qs_mean": df["normalized_rand_qs_mean"].mean(),
+        "normalized_rand_qs_std": df["normalized_rand_qs_std"].mean(),
+        # statistics of Q-values after perturbation
+        "perturb_qs_mean": df["perturb_qs_mean"].mean(),
+        "perturb_qs_std": df["perturb_qs_std"].mean(),
+        # buffer statistics
+        "buffer_obs_mean": buffer_stats["obs"][0],
+        "buffer_obs_std": buffer_stats["obs"][1],
+        "buffer_acs_mean": buffer_stats["acs"][0],
+        "buffer_acs_std": buffer_stats["acs"][1],
+        # gradient norm figure
         "grad_norm": grad_norm_fig,
     }

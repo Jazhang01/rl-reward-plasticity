@@ -11,8 +11,10 @@ import tqdm
 import wandb
 from absl import app, flags
 from config import WANDB_DEFAULT_CONFIG
+from environments.wrappers.observation import permute_observation
 from environments.wrappers.reward import AddGaussianReward, ConstantReward
 from flax.training import checkpoints
+from gymnasium.wrappers import TransformObservation
 from ml_collections import config_flags
 
 from jaxrl_m.dataset import ReplayBuffer
@@ -21,23 +23,34 @@ from jaxrl_m.wandb import default_wandb_config, get_flag_dict, setup_wandb
 from plasticity.plasticity import compute_q_plasticity
 
 FLAGS = flags.FLAGS
-flags.DEFINE_string("env_name", "HalfCheetah-v4", "Environment name.")
-flags.DEFINE_boolean("invert_env", False, "Invert the objective of the environment.")
-flags.DEFINE_string("reward_wrapper", None, "Optional reward wrapper type to use.")
-flags.DEFINE_string("save_dir", None, "Logging dir.")
-flags.DEFINE_string("load_dir", None, "Loading dir.")
-flags.DEFINE_integer("seed", np.random.choice(1000000), "Random seed.")
-flags.DEFINE_integer("eval_episodes", 10, "Number of episodes used for evaluation.")
-flags.DEFINE_integer("log_interval", 1000, "Logging interval.")
-flags.DEFINE_integer("eval_interval", 10000, "Eval interval.")
-flags.DEFINE_integer("save_interval", 25000, "Eval interval.")
-flags.DEFINE_integer("batch_size", 256, "Mini batch size.")
-flags.DEFINE_integer("buffer_size", int(1e6), "Replay buffer size.")
-flags.DEFINE_integer(
-    "random_buffer_size", int(1e5), "Buffer size for use in plasticity calculation."
-)
-flags.DEFINE_integer("max_steps", int(1e6), "Number of training steps.")
-flags.DEFINE_integer("start_steps", int(1e4), "Number of initial exploration steps.")
+if __name__ == "__main__":
+    flags.DEFINE_string("env_name", "HalfCheetah-v4", "Environment name.")
+    flags.DEFINE_boolean(
+        "invert_env", False, "Invert the objective of the environment."
+    )
+    flags.DEFINE_string("reward_wrapper", None, "Optional reward wrapper type to use.")
+    flags.DEFINE_string("save_dir", None, "Logging dir.")
+    flags.DEFINE_string("load_dir", None, "Loading dir.")
+    flags.DEFINE_integer("seed", np.random.choice(1000000), "Random seed.")
+    flags.DEFINE_integer("eval_episodes", 10, "Number of episodes used for evaluation.")
+    flags.DEFINE_integer("log_interval", 1000, "Logging interval.")
+    flags.DEFINE_integer("eval_interval", 10000, "Eval interval.")
+    flags.DEFINE_integer("save_interval", 25000, "Eval interval.")
+    flags.DEFINE_integer("batch_size", 256, "Mini batch size.")
+    flags.DEFINE_integer("buffer_size", int(1e6), "Replay buffer size.")
+    flags.DEFINE_integer(
+        "random_buffer_size", int(1e5), "Buffer size for use in plasticity calculation."
+    )
+    flags.DEFINE_integer("max_steps", int(1e6), "Number of training steps.")
+    flags.DEFINE_integer(
+        "start_steps", int(1e4), "Number of initial exploration steps."
+    )
+
+    flags.DEFINE_integer(
+        "rand_permutation_freq",
+        0,
+        "Frequency used to randomly permute the observations before passing through the critic network. Set to 0 to disable.",
+    )
 
 wandb_config = default_wandb_config()
 wandb_config.update(
@@ -48,44 +61,25 @@ wandb_config.update(
     }
 )
 
-config_flags.DEFINE_config_dict("wandb", wandb_config, lock_config=False)
-config_flags.DEFINE_config_dict(
-    "config", learner.get_default_config(), lock_config=False
-)
+if __name__ == "__main__":
+    config_flags.DEFINE_config_dict("wandb", wandb_config, lock_config=False)
+    config_flags.DEFINE_config_dict(
+        "config", learner.get_default_config(), lock_config=False
+    )
 
 
-def main(_):
-    # Create wandb logger
-    setup_wandb(FLAGS.config.to_dict(), **FLAGS.wandb)
-
-    if FLAGS.save_dir is not None:
-        FLAGS.save_dir = os.path.join(
-            FLAGS.save_dir,
-            wandb.run.project,
-            wandb.config.exp_prefix,
-            wandb.config.experiment_id,
-        )
-        # convert to absolute path
-        FLAGS.save_dir = os.path.abspath(FLAGS.save_dir)
-
-        os.makedirs(FLAGS.save_dir, exist_ok=True)
-        print(f"Saving config to {FLAGS.save_dir}/config.pkl")
-        with open(os.path.join(FLAGS.save_dir, "config.pkl"), "wb") as f:
-            pickle.dump(get_flag_dict(), f)
-
-    rng = jax.random.PRNGKey(FLAGS.seed)
-    
+def create_mujoco_env():
     env_kwargs = {}
     if FLAGS.env_name == "Hopper-v4":
-        env_kwargs['forward_reward_weight'] = 1.0
+        env_kwargs["forward_reward_weight"] = 1.0
     elif FLAGS.env_name == "HalfCheetah-v4":
-        env_kwargs['forward_reward_weight'] = 1.0
+        env_kwargs["forward_reward_weight"] = 1.0
     elif FLAGS.env_name == "Humanoid-v4":
-        env_kwargs['forward_reward_weight'] = 1.25
-    
+        env_kwargs["forward_reward_weight"] = 1.25
+
     if FLAGS.invert_env:
         if FLAGS.env_name in ["Hopper-v4", "HalfCheetah-v4", "Humanoid-v4"]:
-            env_kwargs['forward_reward_weight'] *= -1.0
+            env_kwargs["forward_reward_weight"] *= -1.0
 
     env = EpisodeMonitor(gym.make(FLAGS.env_name, **env_kwargs))
     eval_env = EpisodeMonitor(gym.make(FLAGS.env_name, **env_kwargs))
@@ -107,6 +101,43 @@ def main(_):
 
         env = wrapper(env)
         eval_env = wrapper(env)
+
+    if FLAGS.rand_permutation_freq != 0 and FLAGS.rand_permutation_freq is not None:
+        wrapper = partial(
+            TransformObservation,
+            f=partial(permute_observation, freq=FLAGS.rand_permutation_freq),
+        )
+
+        env = wrapper(env)
+        eval_env = wrapper(eval_env)
+
+    return env, eval_env
+
+
+def main(_):
+    # Create wandb logger
+    setup_wandb(FLAGS.config.to_dict(), **FLAGS.wandb)
+
+    NUM_CHECKPOINTS = 1 + FLAGS.max_steps // FLAGS.save_interval
+    print(f"Keeping {NUM_CHECKPOINTS} checkpoints")
+    if FLAGS.save_dir is not None:
+        FLAGS.save_dir = os.path.join(
+            FLAGS.save_dir,
+            wandb.run.project,
+            wandb.config.exp_prefix,
+            wandb.config.experiment_id,
+        )
+        # convert to absolute path
+        FLAGS.save_dir = os.path.abspath(FLAGS.save_dir)
+
+        os.makedirs(FLAGS.save_dir, exist_ok=True)
+        print(f"Saving config to {FLAGS.save_dir}/config.pkl")
+        with open(os.path.join(FLAGS.save_dir, "config.pkl"), "wb") as f:
+            pickle.dump(get_flag_dict(), f)
+
+    rng = jax.random.PRNGKey(FLAGS.seed)
+
+    env, eval_env = create_mujoco_env()
 
     example_transition = dict(
         observations=env.observation_space.sample(),
@@ -148,11 +179,14 @@ def main(_):
     if FLAGS.load_dir not in [None, "None"]:
         orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
         init_agent = orbax_checkpointer.restore(FLAGS.load_dir, item=agent)
-        
-        # initialize critic params
-        agent.critic.replace(params=init_agent.critic.params)
-        agent.target_critic.replace(params=init_agent.target_critic.params)
 
+        # initialize critic params
+        agent = agent.replace(
+            critic=agent.critic.replace(params=init_agent.critic.params),
+            target_critic=agent.target_critic.replace(
+                params=init_agent.target_critic.params
+            ),
+        )
 
     exploration_metrics = dict()
     obs, _ = env.reset()
@@ -213,9 +247,9 @@ def main(_):
             wandb.log(eval_metrics, step=i)
 
         if i % FLAGS.save_interval == 0 and FLAGS.save_dir is not None:
-            checkpoints.save_checkpoint(FLAGS.save_dir, agent, i)
-            print(f"Saving replay buffer to {FLAGS.save_dir}/buffer.pkl")
-            with open(os.path.join(FLAGS.save_dir, "buffer.pkl"), "wb") as f:
+            checkpoints.save_checkpoint(FLAGS.save_dir, agent, i, keep=NUM_CHECKPOINTS)
+            print(f"Saving replay buffer to {FLAGS.save_dir}/buffer_{i}.pkl")
+            with open(os.path.join(FLAGS.save_dir, f"buffer_{i}.pkl"), "wb") as f:
                 pickle.dump(replay_buffer, f)
 
 
