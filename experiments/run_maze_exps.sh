@@ -64,7 +64,7 @@ export -f run_antmaze
 # run_antmaze "antmaze-medium-diverse-test-v2" 0 None False False
 
 pointmaze_checkpoint="/home/jason/Desktop/coursework/cs285/rl-reward-plasticity/checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_PointMaze_Large-v3_20231211_175240/checkpoint_explore_500000"
-run_pointmaze "PointMaze_LargeDense-v3" 0 $pointmaze_checkpoint False False
+run_pointmaze "PointMaze_LargeDense-v3" 0 None False False
 
 
 # initial experiments
