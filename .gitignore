@@ -127,6 +127,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+venv_d4rl/
 
 # Spyder project settings
 .spyderproject
@@ -161,3 +162,6 @@ cython_debug/
 
 # model checkpoints
 checkpoints
+
+# asdf
+.tool-versions
