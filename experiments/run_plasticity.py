@@ -1,7 +1,7 @@
 import os
 import pickle
 
-import algorithms.sac as learner
+import algorithms.redq as learner
 import gymnasium as gym
 import jax
 import orbax.checkpoint

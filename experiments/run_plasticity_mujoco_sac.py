@@ -2,7 +2,7 @@ import os
 import pickle
 from functools import partial
 
-import algorithms.sac as learner
+import algorithms.redq as learner
 import gymnasium as gym
 import jax
 import numpy as np

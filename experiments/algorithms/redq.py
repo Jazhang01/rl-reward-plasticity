@@ -43,10 +43,6 @@ class SACAgent(flax.struct.PyTreeNode):
             next_dist = agent.actor(batch["next_observations"])
             next_actions, next_log_probs = next_dist.sample_and_log_prob(seed=next_key)
 
-            # next_q1, next_q2 = agent.target_critic(
-            #     batch["next_observations"], next_actions
-            # )
-            # next_q = jnp.minimum(next_q1, next_q2)
             next_qs = agent.target_critic(batch['next_observations'], next_actions)
             next_qs = jax.random.permutation(redq_key, next_qs, axis=0)[:agent.config['num_min_qs']]
             next_q = next_qs.min(axis=0)
@@ -65,10 +61,6 @@ class SACAgent(flax.struct.PyTreeNode):
 
             qs = agent.critic(batch['observations'], batch['actions'], params=critic_params)
             critic_loss = ((qs - target_q) ** 2).mean()
-            # q1, q2 = agent.critic(
-            #     batch["observations"], batch["actions"], params=critic_params
-            # )
-            # critic_loss = ((q1 - target_q) ** 2 + (q2 - target_q) ** 2).mean()
 
             return critic_loss, {
                 "critic_loss": critic_loss,
@@ -95,9 +87,6 @@ class SACAgent(flax.struct.PyTreeNode):
         def actor_loss_fn(actor_params):
             dist = agent.actor(batch["observations"], params=actor_params)
             actions, log_probs = dist.sample_and_log_prob(seed=curr_key)
-
-            # q1, q2 = agent.critic(batch["observations"], actions)
-            # q = jnp.minimum(q1, q2)
 
             qs = agent.critic(batch['observations'], actions)
             q = qs.mean(axis=0)
@@ -133,102 +122,6 @@ class SACAgent(flax.struct.PyTreeNode):
         prefixed_temp_info = {f"temp/{k}": v for k, v in temp_info.items()}
 
         return agent.replace(rng=new_rng, actor=new_actor, temp=new_temp), {**prefixed_actor_info, **prefixed_temp_info}
-
-
-    # @jax.jit
-    # def mini_update(agent, batch: Batch):
-        new_rng, curr_key, next_key, redq_key = jax.random.split(agent.rng, 4)
-
-        def critic_loss_fn(critic_params):
-            next_dist = agent.actor(batch["next_observations"])
-            next_actions, next_log_probs = next_dist.sample_and_log_prob(seed=next_key)
-
-            # next_q1, next_q2 = agent.target_critic(
-            #     batch["next_observations"], next_actions
-            # )
-            # next_q = jnp.minimum(next_q1, next_q2)
-            next_qs = agent.target_critic(batch['next_observations'], next_actions)
-            next_qs = jax.random.permutation(redq_key, next_qs, axis=0)[:agent.config['num_min_qs']]
-            next_q = next_qs.min(axis=0)
-            target_q = (
-                batch["rewards"] + agent.config["discount"] * batch["masks"] * next_q
-            )
-
-            if agent.config["backup_entropy"]:
-                target_q = (
-                    target_q
-                    - agent.config["discount"]
-                    * batch["masks"]
-                    * next_log_probs
-                    * agent.temp()
-                )
-
-            qs = agent.critic(batch['observations'], batch['actions'], params=critic_params)
-            critic_loss = ((qs - target_q) ** 2).mean()
-            # q1, q2 = agent.critic(
-            #     batch["observations"], batch["actions"], params=critic_params
-            # )
-            # critic_loss = ((q1 - target_q) ** 2 + (q2 - target_q) ** 2).mean()
-
-            return critic_loss, {
-                "critic_loss": critic_loss,
-                "q": qs.mean(),
-            }
-
-        def actor_loss_fn(actor_params):
-            dist = agent.actor(batch["observations"], params=actor_params)
-            actions, log_probs = dist.sample_and_log_prob(seed=curr_key)
-
-            # q1, q2 = agent.critic(batch["observations"], actions)
-            # q = jnp.minimum(q1, q2)
-
-            qs = agent.critic(batch['observations'], actions)
-            q = qs.mean(axis=0)
-
-            actor_loss = (log_probs * agent.temp() - q).mean()
-            return actor_loss, {
-                "actor_loss": actor_loss,
-                "entropy": -1 * log_probs.mean(),
-            }
-
-        def temp_loss_fn(temp_params, entropy, target_entropy):
-            temperature = agent.temp(params=temp_params)
-            temp_loss = (temperature * (entropy - target_entropy)).mean()
-            return temp_loss, {
-                "temp_loss": temp_loss,
-                "temperature": temperature,
-            }
-
-        new_critic, critic_info = agent.critic.apply_loss_fn(
-            loss_fn=critic_loss_fn, has_aux=True
-        )
-        new_target_critic = target_update(
-            agent.critic, agent.target_critic, agent.config["target_update_rate"]
-        )
-        new_actor, actor_info = agent.actor.apply_loss_fn(
-            loss_fn=actor_loss_fn, has_aux=True
-        )
-
-        temp_loss_fn = functools.partial(
-            temp_loss_fn,
-            entropy=actor_info["entropy"],
-            target_entropy=agent.config["target_entropy"],
-        )
-        new_temp, temp_info = agent.temp.apply_loss_fn(
-            loss_fn=temp_loss_fn, has_aux=True
-        )
-
-        prefixed_critic_info = {f"critic/{k}": v for k, v in critic_info.items()}
-        prefixed_actor_info = {f"actor/{k}": v for k, v in actor_info.items()}
-        prefixed_temp_info = {f"temp/{k}": v for k, v in temp_info.items()}
-
-        return agent.replace(
-            rng=new_rng,
-            critic=new_critic,
-            target_critic=new_target_critic,
-            actor=new_actor,
-            temp=new_temp,
-        ), {**prefixed_critic_info, **prefixed_actor_info, **prefixed_temp_info}
 
 
     @functools.partial(jax.jit, static_argnames="utd_ratio")

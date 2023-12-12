@@ -26,10 +26,22 @@ LARGE_MAZE = [[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
             [1, R, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1],
             [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]]
 
+
+LARGE_MAZE_TEST = [[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+                [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, R, 1],
+                [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                [1, G, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]]
+
 maze_map = {
     'PointMaze_UMaze-v3': UMAZE,
     'PointMaze_Medium-v3': MEDIUM_MAZE,
     'PointMaze_Large-v3': LARGE_MAZE,
+    'PointMaze_LargeDense-v3': LARGE_MAZE_TEST,
     'AntMaze_UMaze-v4': UMAZE,
     'AntMaze_Medium-v4': MEDIUM_MAZE,
     'AntMaze_Large-v4': LARGE_MAZE,

@@ -3,7 +3,8 @@ import pickle
 from functools import partial
 
 import algorithms.rnd as rnd_learner
-import algorithms.sac as learner
+import algorithms.redq as sac_learner
+import algorithms.dqn as dqn_learner
 import gymnasium as gym
 import jax
 from jax.tree_util import tree_map
@@ -16,6 +17,7 @@ from config import WANDB_DEFAULT_CONFIG
 from environments.maze.custom_maze import maze_map
 from environments.maze.visualize import visual_evaluate
 from environments.wrappers.antmaze import BoundedAntMaze, D4RLWrapper
+from environments.wrappers.pointmaze import DiscretePointMaze
 from environments.wrappers.reward import AddGaussianReward, ConstantReward
 from flax.core.frozen_dict import freeze, unfreeze
 from flax.training import checkpoints
@@ -26,7 +28,6 @@ from ml_collections import config_flags
 from jaxrl_m.dataset import ReplayBuffer
 from jaxrl_m.evaluation import EpisodeMonitor, evaluate, flatten, supply_rng
 from jaxrl_m.wandb import default_wandb_config, get_flag_dict, setup_wandb
-from plasticity.plasticity import compute_q_plasticity
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string("env_name", "PointMaze_UMaze-v3", "Environment name.")
@@ -41,12 +42,13 @@ flags.DEFINE_integer("eval_interval", 10000, "Eval interval.")
 flags.DEFINE_integer("save_interval", 25000, "Eval interval.")
 flags.DEFINE_integer("batch_size", 256, "Mini batch size.")
 flags.DEFINE_integer("buffer_size", int(1e6), "Replay buffer size.")
-flags.DEFINE_integer(
-    "random_buffer_size", int(1e5), "Buffer size for use in plasticity calculation."
-)
 flags.DEFINE_integer("max_steps", int(1e6), "Number of training steps.")
 flags.DEFINE_integer("start_steps", int(1e4), "Number of initial exploration steps.")
 flags.DEFINE_integer("utd_ratio", 1, "Update to data ratio.")
+
+flags.DEFINE_bool("use_eval_agent", True, "Train an agent on rewards.")
+flags.DEFINE_bool("use_explore_agent", False, "Train an agent on rewards and exploration bonus.")
+flags.DEFINE_bool("use_noise_agent", False, "Train an agent on rewards and noise.")
 
 wandb_config = default_wandb_config()
 wandb_config.update(
@@ -59,7 +61,13 @@ wandb_config.update(
 
 config_flags.DEFINE_config_dict("wandb", wandb_config, lock_config=False)
 config_flags.DEFINE_config_dict(
-    "config", learner.get_default_config(), lock_config=False
+    "sac_config", sac_learner.get_default_config(), lock_config=False
+)
+config_flags.DEFINE_config_dict(
+    "dqn_config", dqn_learner.get_default_config(), lock_config=False
+)
+config_flags.DEFINE_config_dict(
+    "rnd_config", rnd_learner.get_default_config(), lock_config=False
 )
 
 
@@ -98,10 +106,13 @@ def create_maze_env():
         - debugging and visualization
         - allowing the agent to know its location in the maze (e.g. for location based reward bonuses)
         """
-        filter_keys.append('achieved_goal')  
+        filter_keys.append('achieved_goal')
+        wrapper = BoundedAntMaze
+    elif 'PointMaze' in FLAGS.env_name:
+        wrapper = partial(DiscretePointMaze, directions=FLAGS.dqn_config.num_actions)
 
     env = FlattenObservation(FilterObservation(env, filter_keys=filter_keys))
-    env = BoundedAntMaze(env)
+    env = wrapper(env)
     env = EpisodeMonitor(env)
 
     return wrap_reward(env)
@@ -110,8 +121,6 @@ def create_maze_env():
 def create_d4rl_antmaze():
     import d4rl
     import gym as ogym
-
-    FLAGS.env_name = 'antmaze-medium-diverse-v2'
 
     env = ogym.make(FLAGS.env_name)
     env = D4RLWrapper(env)
@@ -122,7 +131,14 @@ def create_d4rl_antmaze():
 
 def main(_):
     # Create wandb logger
-    setup_wandb(FLAGS.config.to_dict(), **FLAGS.wandb)
+    if 'antmaze' in FLAGS.env_name:
+        learner = sac_learner
+        learner_config = FLAGS.sac_config
+    elif 'PointMaze' in FLAGS.env_name:
+        learner = dqn_learner
+        learner_config = FLAGS.dqn_config
+
+    setup_wandb(learner_config.to_dict(), **FLAGS.wandb)
 
     if FLAGS.save_dir is not None:
         FLAGS.save_dir = os.path.join(
@@ -141,10 +157,12 @@ def main(_):
 
     rng = jax.random.PRNGKey(FLAGS.seed)
     
-    env = create_d4rl_antmaze()
-    eval_env = create_d4rl_antmaze()
-    # env = create_maze_env()
-    # eval_env = create_maze_env()
+    if 'antmaze' in FLAGS.env_name:
+        env = create_d4rl_antmaze()
+        eval_env = create_d4rl_antmaze()
+    else:
+        env = create_maze_env()
+        eval_env = create_maze_env()
 
     example_transition = dict(
         observations=env.observation_space.sample(),
@@ -156,44 +174,51 @@ def main(_):
 
     replay_buffer = ReplayBuffer.create(example_transition, size=FLAGS.buffer_size)
 
-    exploration_rng, plasticity_rng = jax.random.split(rng, 2)
+    rng, exploration_rng = jax.random.split(rng, 2)
     
-    explore_agent = learner.create_learner(
-        FLAGS.seed,
-        example_transition["observations"][None],
-        example_transition["actions"][None],
-        max_steps=FLAGS.max_steps,
-        **FLAGS.config,
-    )
-    evaluate_agent = learner.create_learner(
-        FLAGS.seed,
-        example_transition["observations"][None],
-        example_transition["actions"][None],
-        max_steps=FLAGS.max_steps,
-        **FLAGS.config,
-    )
+    def make_agent():
+        return learner.create_learner(
+            FLAGS.seed,
+            example_transition["observations"][None],
+            example_transition["actions"][None],
+            **learner_config,
+        )
 
+    agent_types = []
+    if FLAGS.use_eval_agent:
+        agent_types.append("eval")
+    if FLAGS.use_explore_agent:
+        agent_types.append("explore")
+    if FLAGS.use_noise_agent:
+        agent_types.append("noise")
+    
+    assert len(agent_types) > 0, "Need at least one agent."
+    agents = {type: make_agent() for type in agent_types}
+    
     rnd = rnd_learner.create_learner(
         FLAGS.seed,
         example_transition["observations"][None],
         example_transition["actions"][None],
-        max_steps=FLAGS.max_steps,
-        # TODO: rnd config
+        **FLAGS.rnd_config
     )
 
     if FLAGS.load_dir not in [None, "None"]:
         orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-        init_agent = orbax_checkpointer.restore(FLAGS.load_dir, item=explore_agent)
+        init_agent = orbax_checkpointer.restore(FLAGS.load_dir, item=agents[agent_types[0]])
         
         # initialize critic params
-        explore_agent.critic.replace(params=init_agent.critic.params)
-        explore_agent.target_critic.replace(params=init_agent.target_critic.params)
-
+        for agent_type, agent in agents.items():
+            agents[agent_type] = agent.replace(
+                critic=agent.critic.replace(params=init_agent.critic.params),
+                target_critic=agent.target_critic.replace(params=init_agent.target_critic.params)
+            )
 
     exploration_metrics = dict()
     obs, _ = env.reset()
 
-    explore_rollout = True
+    # rotate between agents when performing environment rollouts
+    agent_id = 0
+
     for i in tqdm.tqdm(
         range(1, FLAGS.max_steps + 1), smoothing=0.1, dynamic_ncols=True
     ):
@@ -201,11 +226,8 @@ def main(_):
             action = env.action_space.sample()
         else:
             exploration_rng, key = jax.random.split(exploration_rng)
-            if explore_rollout:
-                action = explore_agent.sample_actions(obs, seed=key)
-            else:
-                action = evaluate_agent.sample_actions(obs, seed=key)
-            action = explore_agent.sample_actions(obs, seed=key)
+            agent = agents[agent_types[agent_id]]
+            action = agent.sample_actions(obs, seed=key)
 
         next_obs, reward, term, trunc, info = env.step(action)
         done = term or trunc
@@ -227,22 +249,35 @@ def main(_):
                 f"exploration/{k}": v for k, v in flatten(info).items()
             }
             obs, _ = env.reset()
-            explore_rollout = not explore_rollout
+            agent_id = (agent_id + 1) % len(agents)
 
         if replay_buffer.size < FLAGS.start_steps:
             continue
 
-        batch = replay_buffer.sample(FLAGS.batch_size * FLAGS.utd_ratio)
-        # evaluate_agent, update_info = evaluate_agent.update(batch, utd_ratio=FLAGS.utd_ratio)
-        
-        if FLAGS.reward_bonus == 'rnd':
-            batch = unfreeze(batch)
-            batch['rewards'] += rnd.get_rewards(batch)
+        base_batch = replay_buffer.sample(FLAGS.batch_size * FLAGS.utd_ratio)
+        update_info = {}
+        for agent_type, agent in agents.items():
+            batch = unfreeze(base_batch)
+            if agent_type == 'explore':
+                if FLAGS.reward_bonus == 'rnd':
+                    batch['rewards'] += rnd.get_rewards(batch)
+                else:
+                    raise NotImplementedError
+            elif agent_type == 'eval':
+                pass
+            elif agent_type == 'shift':
+                batch['rewards'] += 1
+            elif agent_type == 'noise':
+                shape = batch['rewards'].shape
+                mean, std = np.zeros(shape), np.ones(shape)
+                batch['rewards'] += 0.01 * np.random.normal(mean, std)
             batch = freeze(batch)
 
-        explore_agent, update_info = explore_agent.update(batch, utd_ratio=FLAGS.utd_ratio)
+            agent, info = agent.update(batch, utd_ratio=FLAGS.utd_ratio)
+            agents[agent_type] = agent
+            update_info.update({f'{agent_type}/{k}': v for k, v in info.items()})
 
-        if replay_buffer.size >= FLAGS.start_steps:
+        if replay_buffer.size >= FLAGS.start_steps and agent_types[agent_id] == 'explore':
             rnd, rnd_update_info = rnd.update(trans)
             update_info.update({f'rnd/{k}': v for k, v in rnd_update_info.items()})
 
@@ -253,22 +288,19 @@ def main(_):
             exploration_metrics = dict()
 
         if i % FLAGS.eval_interval == 0:
-            # evaluate_policy_fn = partial(supply_rng(evaluate_agent.sample_actions), temperature=0.0)
-            # eval_info = visual_evaluate(evaluate_policy_fn, eval_env, num_episodes=FLAGS.eval_episodes)
-
-            explore_policy_fn = partial(supply_rng(explore_agent.sample_actions), temperature=0.0)
-            eval_explore_info = visual_evaluate(explore_policy_fn, eval_env, num_episodes=FLAGS.eval_episodes)
-
-            # eval_metrics = {f"evaluation/evaluate/{k}": v for k, v in eval_info.items()}
             eval_metrics = {}
-            eval_metrics.update({f"evaluation/explore/{k}": v for k, v in eval_explore_info.items()})
+            for agent_type, agent in agents.items():
+                policy_fn = partial(supply_rng(agent.sample_actions), temperature=0.0)
+                info = visual_evaluate(policy_fn, eval_env, num_episodes=FLAGS.eval_episodes)
+                eval_metrics.update({f'evaluation/{agent_type}/{k}': v for k, v in info.items()})
             wandb.log(eval_metrics, step=i)
 
         if i % FLAGS.save_interval == 0 and FLAGS.save_dir is not None:
-            checkpoints.save_checkpoint(FLAGS.save_dir, explore_agent, i, prefix="checkpoint_explore_", keep=10)
-            checkpoints.save_checkpoint(FLAGS.save_dir, evaluate_agent, i, prefix="checkpoint_evaluate_", keep=10)
-            print(f"Saving replay buffer to {FLAGS.save_dir}/buffer.pkl")
-            with open(os.path.join(FLAGS.save_dir, "buffer.pkl"), "wb") as f:
+            for agent_type, agent in agents.items():
+                checkpoints.save_checkpoint(FLAGS.save_dir, agent, i, prefix=f'checkpoint_{agent_type}_', keep=10)
+            buffer_path = os.path.join(FLAGS.save_dir, f'buffer_{i}.pkl')
+            print(f"Saving replay buffer to {buffer_path}")
+            with open(buffer_path, "wb") as f:
                 pickle.dump(replay_buffer, f)
 
 
