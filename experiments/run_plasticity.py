@@ -96,10 +96,13 @@ def main(_):
     checkpoint_files = {}
     dataset_files = {}
 
+    rng = jax.random.PRNGKey(seed=FLAGS.seed)
+
     if FLAGS.env_name.startswith("PointMaze"):
         env = create_maze_env()
     elif FLAGS.env_name in {"Hopper-v4", "HalfCheetah-v4", "Humanoid-v4"}:
-        env, _ = create_mujoco_env()
+        rng, mujoco_env_rng = jax.random.split(rng, 2)
+        env, _ = create_mujoco_env(mujoco_env_rng)
     else:
         raise ValueError(f"Invalid environment name: {FLAGS.env_name}")
 
@@ -138,7 +141,6 @@ def main(_):
 
     sorted_steps = sorted(checkpoint_files.keys())
 
-    rng = jax.random.PRNGKey(seed=FLAGS.seed)
     rng, plasticity_key, statistics_key = jax.random.split(rng, 3)
 
     plasticity_dataset = ReplayBuffer.create(

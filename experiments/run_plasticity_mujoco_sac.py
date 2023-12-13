@@ -19,6 +19,7 @@ from ml_collections import config_flags
 
 from jaxrl_m.dataset import ReplayBuffer
 from jaxrl_m.evaluation import EpisodeMonitor, evaluate, flatten, supply_rng
+from jaxrl_m.typing import PRNGKey
 from jaxrl_m.wandb import default_wandb_config, get_flag_dict, setup_wandb
 from plasticity.plasticity import compute_q_plasticity
 
@@ -68,7 +69,7 @@ if __name__ == "__main__":
     )
 
 
-def create_mujoco_env():
+def create_mujoco_env(rng: PRNGKey):
     env_kwargs = {}
     if FLAGS.env_name == "Hopper-v4":
         env_kwargs["forward_reward_weight"] = 1.0
@@ -137,7 +138,8 @@ def main(_):
 
     rng = jax.random.PRNGKey(FLAGS.seed)
 
-    env, eval_env = create_mujoco_env()
+    rng, mujoco_env_rng = jax.random.split(rng, 2)
+    env, eval_env = create_mujoco_env(mujoco_env_rng)
 
     example_transition = dict(
         observations=env.observation_space.sample(),
