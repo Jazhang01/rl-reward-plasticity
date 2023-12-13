@@ -25,7 +25,11 @@ def order_batch_by_similarity(rng: PRNGKey, batch: Batch, k: int = 10):
     """
 
     # combine observations and actions in the batch
-    combined = jnp.concatenate([batch["observations"], batch["actions"]], axis=-1)
+    obs, actions = batch['observations'], batch['actions']
+    if len(actions.shape) == 1:
+        actions = actions.reshape(-1, 1)
+
+    combined = jnp.concatenate([obs, actions], axis=-1)
 
     kmeans_sol = kmeans_jit(rng, combined, k)
 
@@ -118,8 +122,8 @@ def dead_unit_count(grads_tree: Sequence[dict], threshold=1e-5):
     return num_dead_units
 
 
-def hessian_eigenvals(rng: PRNGKey, agent: TrainState, batch: Batch):
-    eig_vals, density, grids = compute_hessian_density(rng, agent, batch)
+def hessian_eigenvals(rng: PRNGKey, agent: TrainState, batch: Batch, critic_type: str = "sac_critic"):
+    eig_vals, density, grids = compute_hessian_density(rng, agent, batch, critic_type=critic_type)
 
     max_eig_val = jnp.max(eig_vals)
     min_eig_val = jnp.min(eig_vals)
@@ -159,6 +163,7 @@ def compute_statistics(
     hessian_batch_size: int = 1024,
     dead_unit_batch_size: int = 1024,
     dead_unit_threshold=1e-5,
+    critic_type: str = "sac_critic",
 ):
     """
     Returns a nested dict, where the second level dictionary is a flattened dict containing all the relevant statistics.
@@ -175,7 +180,11 @@ def compute_statistics(
         # grads, _ = _gradients(grads_key, agent, grads_batch)
         # compute individual gradients
         gradient_cov_grads_tree = unbatched_grads(
-            grads_key, agent, gradient_cov_grads_batch, gradient_cov_batch_size
+            grads_key, 
+            agent, 
+            gradient_cov_grads_batch, 
+            gradient_cov_batch_size,
+            loss_fn=critic_type,
         )
 
         dead_unit_grads_tree = unbatched_grads(
@@ -183,7 +192,7 @@ def compute_statistics(
             agent,
             dead_unit_grads_batch,
             dead_unit_batch_size,
-            loss_fn="identity",
+            loss_fn=critic_type + "_" + "identity",
         )
         progress_bar.update(1)
 
@@ -202,7 +211,7 @@ def compute_statistics(
         progress_bar.update(1)
 
         progress_bar.set_description("Computing Hessian eigenvalues")
-        hessian_eigenvals_info = hessian_eigenvals(hessian_key, agent, hessian_batch)
+        hessian_eigenvals_info = hessian_eigenvals(hessian_key, agent, hessian_batch, critic_type=critic_type)
         progress_bar.update(1)
 
     return {

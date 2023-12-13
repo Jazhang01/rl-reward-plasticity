@@ -1,7 +1,9 @@
 import os
 import pickle
 
-import algorithms.sac as learner
+import algorithms.sac as sac_learner
+import algorithms.redq as redq_learner
+import algorithms.dqn as dqn_learner
 import gymnasium as gym
 import jax
 import jax.numpy.linalg
@@ -16,7 +18,7 @@ from gymnasium.wrappers.filter_observation import FilterObservation
 from gymnasium.wrappers.flatten_observation import FlattenObservation
 from jax.tree_util import DictKey, SequenceKey
 from ml_collections import config_flags
-from run_plasticity_maze_sac import create_maze_env
+from run_plasticity_maze_sac import create_maze_env, create_d4rl_antmaze
 from run_plasticity_mujoco_sac import create_mujoco_env
 
 import plasticity.statistics
@@ -31,6 +33,9 @@ if __name__ == "__main__":
     flags.DEFINE_integer("seed", 0, "Random seed.")
     flags.DEFINE_string(
         "checkpoints", None, "Path to a folder of checkpoints and saved replay buffers."
+    )
+    flags.DEFINE_string(
+        "checkpoint_keyword", None, "Keyword to filter checkpoints."
     )
     flags.DEFINE_integer("batch_size", 256, "Batch size.")
 
@@ -76,7 +81,13 @@ wandb_config.update(
 if __name__ == "__main__":
     config_flags.DEFINE_config_dict("wandb", wandb_config, lock_config=False)
     config_flags.DEFINE_config_dict(
-        "config", learner.get_default_config(), lock_config=False
+        "sac_config", sac_learner.get_default_config(), lock_config=False
+    )
+    config_flags.DEFINE_config_dict(
+        "redq_config", redq_learner.get_default_config(), lock_config=False
+    )
+    config_flags.DEFINE_config_dict(
+        "dqn_config", dqn_learner.get_default_config(), lock_config=False
     )
 
 
@@ -90,21 +101,33 @@ def main(_):
     - plasticity of the Q function of each checkpoint on the data in the replay buffer
     - plots of everything
     """
-    # Create wandb logger
-    setup_wandb(FLAGS.config.to_dict(), **FLAGS.wandb)
-
-    checkpoint_files = {}
-    dataset_files = {}
-
     rng = jax.random.PRNGKey(seed=FLAGS.seed)
 
     if FLAGS.env_name.startswith("PointMaze"):
         env = create_maze_env()
+        critic_type = "dqn_critic"
+        learner = dqn_learner
+        learner_config = FLAGS.dqn_config
+    elif FLAGS.env_name.startswith('antmaze'):
+        env = create_d4rl_antmaze()
+        critic_type = "redq_critic"
+        learner = redq_learner
+        learner_config = FLAGS.redq_config
     elif FLAGS.env_name in {"Hopper-v4", "HalfCheetah-v4", "Humanoid-v4"}:
         rng, mujoco_env_rng = jax.random.split(rng, 2)
         env, _ = create_mujoco_env(mujoco_env_rng)
+        critic_type = "sac_critic"
+        learner = sac_learner
+        learner_config = FLAGS.sac_config
     else:
         raise ValueError(f"Invalid environment name: {FLAGS.env_name}")
+    
+    # Create wandb logger
+    setup_wandb(learner_config.to_dict(), **FLAGS.wandb)
+
+    checkpoint_files = {}
+    dataset_files = {}
+
 
     example_transition = dict(
         observations=env.observation_space.sample(),
@@ -118,12 +141,15 @@ def main(_):
         FLAGS.seed,
         example_transition["observations"][None],
         example_transition["actions"][None],
-        **FLAGS.config,
+        **learner_config,
     )
 
     orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
     for filename in os.listdir(FLAGS.checkpoints):
         if filename.startswith("checkpoint"):
+            if FLAGS.checkpoint_keyword not in filename:
+                continue
+
             path = os.path.join(FLAGS.checkpoints, filename)
 
             ckpt_info = filename.split("_")
@@ -150,7 +176,10 @@ def main(_):
         rng, obs_key, next_obs_key, action_key = jax.random.split(rng, 4)
         obs = jax.random.normal(obs_key, env.observation_space.shape)
         next_obs = jax.random.normal(next_obs_key, env.observation_space.shape)
-        action = jax.random.normal(action_key, env.action_space.shape)
+        if critic_type == "dqn_critic":
+            action = env.action_space.sample()
+        else:
+            action = jax.random.normal(action_key, env.action_space.shape)
         plasticity_dataset.add_transition(
             dict(
                 observations=obs,
@@ -201,6 +230,7 @@ def main(_):
             checkpoint_replay_buffer=checkpoint_dataset,
             batch_size=FLAGS.batch_size,
             rand_qs_weight=FLAGS.rand_qs_weight,
+            critic_type=critic_type
         )
         info.update({f"plasticity/{k}": v for k, v in plasticity_info.items()})
 
@@ -214,6 +244,7 @@ def main(_):
             dead_unit_batch_size=FLAGS.dead_unit_batch_size,
             dead_unit_threshold=FLAGS.dead_unit_threshold,
             hessian_batch_size=FLAGS.hessian_batch_size,
+            critic_type=critic_type,
         )
 
         num_dead_units = statistics["dead_unit_count"]

@@ -1,4 +1,5 @@
 from typing import Sequence
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -117,7 +118,7 @@ def group_update_mse_lyle(
     return new_critics, update_infos
 
 
-@jax.jit
+@partial(jax.jit, static_argnames=('critic_type',))
 def update_mse_perturb(
     critic: TrainState,
     initial_critic: TrainState,
@@ -126,6 +127,7 @@ def update_mse_perturb(
     rand_weight: float = 10,
     rand_qs_mean=0,
     rand_qs_std=1,
+    critic_type: str = "sac_critic"
 ):
     """
     Updates the critic with randomly perturbed targets.
@@ -159,12 +161,51 @@ def update_mse_perturb(
             "perturb_qs_std": perturb_qs.std(),
         }
         return loss, info
+    
+    def dqn_mse_loss_fn(params):
+        obs, action = batch["observations"], batch["actions"]
 
-    new_critic, info = critic.apply_loss_fn(loss_fn=mse_loss_fn, has_aux=True)
+        qa = critic(obs, params=params).mean(axis=0)
+        qs = jnp.take_along_axis(qa, action[..., None], axis=-1).squeeze()
+
+        init_qa = initial_critic(obs, params=initial_critic.params).mean(axis=0)
+        init_qs = jnp.take_along_axis(init_qa, action[..., None], axis=-1).squeeze()
+
+        rand_qa = rand_critic(obs, params=rand_critic.params).mean(axis=0)
+        rand_qs = jnp.take_along_axis(rand_qa, action[..., None], axis=-1).squeeze()
+
+        normalized_rand_qs = (rand_qs - rand_qs_mean) / (rand_qs_std + 1e-6)
+
+        perturb_qs = init_qs + init_qs.std() * rand_weight * normalized_rand_qs
+        perturb_qs = jax.lax.stop_gradient(perturb_qs)
+
+        loss = ((qs - perturb_qs) ** 2).mean() / (init_qs.var() + 1e-6)
+
+        info = {
+            "loss": loss,
+            "qs_mean": qs.mean(),
+            "qs_std": qs.std(),
+            "init_qs_mean": init_qs.mean(),
+            "init_qs_std": init_qs.std(),
+            "rand_qs_mean": rand_qs.mean(),
+            "rand_qs_std": rand_qs.std(),
+            "normalized_rand_qs_mean": normalized_rand_qs.mean(),
+            "normalized_rand_qs_std": normalized_rand_qs.std(),
+            "perturb_qs_mean": perturb_qs.mean(),
+            "perturb_qs_std": perturb_qs.std(),
+        }
+        return loss, info
+    
+    if critic_type == 'dqn_critic':
+        loss_fn = dqn_mse_loss_fn
+    else:
+        loss_fn = mse_loss_fn
+
+    new_critic, info = critic.apply_loss_fn(loss_fn=loss_fn, has_aux=True)
     return new_critic, info
 
 
-@jax.jit
+@partial(jax.jit, static_argnames=("critic_type",))
 def group_update_mse_perturb(
     critics: Sequence[TrainState],
     initial_critics: Sequence[TrainState],
@@ -173,6 +214,7 @@ def group_update_mse_perturb(
     rand_weight: float = 10,
     rand_qs_mean=0,
     rand_qs_std=1,
+    critic_type: str = "sac_critic"
 ):
     """
     Batch update critics to match target networks.
@@ -192,6 +234,7 @@ def group_update_mse_perturb(
             rand_weight=rand_weight,
             rand_qs_mean=rand_qs_mean,
             rand_qs_std=rand_qs_std,
+            critic_type=critic_type
         )
         update_infos.append(update_info)
 
@@ -204,6 +247,7 @@ def compute_rand_qs_stats(
     buffer_stats,
     batch_size: int = 256,
     num_samples: int = 5000,
+    critic_type: str = "sac_critic",
 ):
     """
     Samples from the replay buffer to get an estimate of the mean and standard deviation
@@ -212,9 +256,17 @@ def compute_rand_qs_stats(
 
     @jax.jit
     def compute_rand_qs(obs, action):
-        return jnp.array(
-            [critic(obs, action, params=critic.params) for critic in rand_critics]
-        )
+        if critic_type == 'dqn_critic':
+            qs = []
+            for critic in rand_critics:
+                qa = critic(obs, params=critic.params).mean(axis=0)
+                q = jnp.take_along_axis(qa, action[..., None], axis=-1).squeeze()
+                qs.append(q)
+            return jnp.array(qs)
+        else:
+            return jnp.array(
+                [critic(obs, action, params=critic.params) for critic in rand_critics]
+            )
 
     total_mean = 0
     total_std = 0
@@ -222,7 +274,7 @@ def compute_rand_qs_stats(
         num_samples, desc="Sampling rand_qs for mean/std computation", leave=False
     ):
         batch = replay_buffer.sample(batch_size)
-        batch = rescale_batch(batch, buffer_stats)
+        batch = rescale_batch(batch, buffer_stats, critic_type=critic_type)
 
         obs, action = batch["observations"], batch["actions"]
         rand_qs = compute_rand_qs(obs, action)
@@ -267,8 +319,8 @@ def compute_buffer_stats(
     }
 
 
-@jax.jit
-def rescale_batch(batch, buffer_stats):
+@partial(jax.jit, static_argnames=("critic_type",))
+def rescale_batch(batch, buffer_stats, critic_type="sac_critic"):
     """
     Rescale a batch according to the buffer stats.
     """
@@ -281,7 +333,9 @@ def rescale_batch(batch, buffer_stats):
     obs_mean, obs_std = buffer_stats["obs"]
     acs_mean, acs_std = buffer_stats["acs"]
     obs = obs * obs_std + obs_mean
-    acs = acs * acs_std + acs_mean
+
+    if critic_type != "dqn_critic":
+        acs = acs * acs_std + acs_mean
 
     new_batch = {
         **batch,
@@ -301,6 +355,7 @@ def compute_q_plasticity(
     num_train_steps: int = 2000,
     batch_size: int = 256,
     rand_qs_weight=10,
+    critic_type: str = "sac_critic"
 ):
     """
     Compute the empirical plasticity of a train state using MSE loss on random targets
@@ -316,10 +371,16 @@ def compute_q_plasticity(
     batch = replay_buffer.sample(1)
     critic_def = critic.model_def
 
-    rand_critic_params = [
-        critic_def.init(cur_rng_key, batch["observations"], batch["actions"])["params"]
-        for cur_rng_key in rng_keys
-    ]
+    if critic_type == 'dqn_critic':
+        rand_critic_params = [
+            critic_def.init(cur_rng_key, batch["observations"])["params"]
+            for cur_rng_key in rng_keys
+        ]    
+    else:    
+        rand_critic_params = [
+            critic_def.init(cur_rng_key, batch["observations"], batch["actions"])["params"]
+            for cur_rng_key in rng_keys
+        ]
     rand_critics = [
         TrainState.create(critic_def, rand_critic_param)
         for rand_critic_param in rand_critic_params
@@ -349,7 +410,7 @@ def compute_q_plasticity(
 
     # compute rand qs stats with the rescaled bufffer
     rand_qs_mean, rand_qs_std = compute_rand_qs_stats(
-        replay_buffer, rand_critics, batch_size=batch_size, buffer_stats=buffer_stats
+        replay_buffer, rand_critics, batch_size=batch_size, buffer_stats=buffer_stats, critic_type=critic_type
     )
 
     # get random perturbation to observations
@@ -361,7 +422,7 @@ def compute_q_plasticity(
         range(num_train_steps), desc="Computing plasticity", leave=False
     ):
         batch = replay_buffer.sample(batch_size)
-        batch = rescale_batch(batch, buffer_stats)
+        batch = rescale_batch(batch, buffer_stats, critic_type=critic_type)
         # critics, update_info = group_update_mse_lyle(
         #     critics, rand_critics, means=q_means, batch=batch, freq=10
         # )
@@ -373,6 +434,7 @@ def compute_q_plasticity(
             rand_weight=rand_qs_weight,
             rand_qs_mean=rand_qs_mean,
             rand_qs_std=rand_qs_std,
+            critic_type=critic_type
         )
         update_infos.append(update_info)
 

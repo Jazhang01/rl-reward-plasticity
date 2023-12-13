@@ -16,9 +16,7 @@
 
 
 import math
-
 import numpy as np
-
 
 def eigv_to_density(
     eig_vals,
