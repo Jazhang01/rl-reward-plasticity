@@ -75,7 +75,7 @@ class DQNAgent(flax.struct.PyTreeNode):
         seed: PRNGKey,
         temperature: float = 1.0,
     ) -> jnp.ndarray:
-        random = (jax.random.uniform(seed) < agent.config['epsilon'] * temperature).item()
+        random = (jax.random.uniform(seed) < agent.config['epsilon']).item()
         return agent._sample_actions(observations, seed=seed, random=random)
 
 
