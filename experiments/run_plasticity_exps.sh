@@ -23,15 +23,48 @@ run_mujoco() {
 }
 export -f run_mujoco
 
+run_antmaze_plasticity() {
+    python experiments/run_plasticity.py \
+        --env_name="antmaze-medium-diverse-v2" \
+        --checkpoints=$1 \
+        --checkpoint_keyword=$2 \
+        --rand_qs_weight=10 \
+        --redq_config.hidden_dims="(256,256,256)" \
+        --redq_config.backup_entropy=False \
+        --redq_config.num_qs=10 \
+        --redq_config.num_min_qs=1 \
+        --redq_config.use_layer_norm=True
+}
+export -f run_antmaze_plasticity
+
+run_pointmaze_plasticity() {
+    python experiments/run_plasticity.py \
+        --env_name="PointMaze_Large-v3" \
+        --checkpoints=$1 \
+        --checkpoint_keyword=$2 \
+        --rand_qs_weight=10 \
+        --dqn_config.hidden_dims="(256,256)" \
+        --dqn_config.use_layer_norm=$3
+}
+export -f run_pointmaze_plasticity
+
 # network size 256
 # run_plasticity "Hopper-v4" "checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_Hopper-v4_20231209_200602" 10
 # run_plasticity "HalfCheetah-v4" "checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_HalfCheetah-v4_20231209_203929" 10
 # run_plasticity "Humanoid-v4" "checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_Humanoid-v4_20231209_211215" 10
 
+# run_pointmaze_plasticity "checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_PointMaze_Large-v3_20231212_071041" "eval" True
+run_pointmaze_plasticity "checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_PointMaze_Large-v3_20231212_071041" "explore" True
+run_pointmaze_plasticity "checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_PointMaze_Large-v3_20231212_071041" "noise" True
+
+# run_antmaze_plasticity "checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_antmaze-medium-diverse-v2_20231212_090117" "eval"
+# run_antmaze_plasticity "checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_antmaze-medium-diverse-v2_20231212_090117" "eval"
+# run_antmaze_plasticity "checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_antmaze-medium-diverse-v2_20231212_090117" "eval"
+
 # network size 64
-run_plasticity "Hopper-v4" "checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_Hopper-v4_20231210_084347" 10 "(64,64)"
-run_plasticity "HalfCheetah-v4" "checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_HalfCheetah-v4_20231210_085554" 10 "(64,64)"
-run_plasticity "Humanoid-v4" "checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_Humanoid-v4_20231210_090929" 10 "(64,64)"
+# run_plasticity "Hopper-v4" "checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_Hopper-v4_20231210_084347" 10 "(64,64)"
+# run_plasticity "HalfCheetah-v4" "checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_HalfCheetah-v4_20231210_085554" 10 "(64,64)"
+# run_plasticity "Humanoid-v4" "checkpoints/rl-reward-plasticity/sac_test/sac_test_sac_Humanoid-v4_20231210_090929" 10 "(64,64)"
 
 # parallel --ungroup -j1 --delay 5s run_plasticity \
 #     ::: \
