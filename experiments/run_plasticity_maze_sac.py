@@ -19,10 +19,13 @@ from environments.maze.visualize import visual_evaluate
 from environments.wrappers.antmaze import BoundedAntMaze, D4RLWrapper
 from environments.wrappers.pointmaze import DiscretePointMaze
 from environments.wrappers.reward import AddGaussianReward, ConstantReward
+from environments.wrappers.observation import permute_observation
 from flax.core.frozen_dict import freeze, unfreeze
 from flax.training import checkpoints
 from gymnasium.wrappers.filter_observation import FilterObservation
 from gymnasium.wrappers.flatten_observation import FlattenObservation
+from gymnasium.wrappers.transform_observation import TransformObservation
+from gym.wrappers.transform_observation import TransformObservation as OTransformObservation
 from ml_collections import config_flags
 
 from jaxrl_m.dataset import ReplayBuffer
@@ -50,6 +53,12 @@ if __name__ == "__main__":
     flags.DEFINE_bool("use_eval_agent", True, "Train an agent on rewards.")
     flags.DEFINE_bool("use_explore_agent", False, "Train an agent on rewards and exploration bonus.")
     flags.DEFINE_bool("use_noise_agent", False, "Train an agent on rewards and noise.")
+
+flags.DEFINE_integer(
+    "rand_permutation_freq",
+    0,
+    "Frequency used to randomly permute the observations before passing through the critic network. Set to 0 to disable.",
+)
 
 wandb_config = default_wandb_config()
 wandb_config.update(
@@ -117,7 +126,17 @@ def create_maze_env():
     env = wrapper(env)
     env = EpisodeMonitor(env)
 
-    return wrap_reward(env)
+    env = wrap_reward(env)
+
+    if FLAGS.rand_permutation_freq != 0 and FLAGS.rand_permutation_freq is not None:
+        wrapper = partial(
+            TransformObservation, 
+            f=partial(permute_observation, freq=FLAGS.rand_permutation_freq),
+        )
+
+        env = wrapper(env)
+
+    return env
     
 
 def create_d4rl_antmaze():
@@ -125,10 +144,20 @@ def create_d4rl_antmaze():
     import gym as ogym
 
     env = ogym.make(FLAGS.env_name)
+
+    if FLAGS.rand_permutation_freq != 0 and FLAGS.rand_permutation_freq is not None:
+        wrapper = partial(
+            OTransformObservation, 
+            f=partial(permute_observation, freq=FLAGS.rand_permutation_freq),
+        )
+        env = wrapper(env)
+
     env = D4RLWrapper(env)
     env = EpisodeMonitor(env)
 
-    return wrap_reward(env)
+    env = wrap_reward(env)
+
+    return env
 
 
 def main(_):
